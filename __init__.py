@@ -697,78 +697,88 @@ def _clear_ctfd_caches():
     clear_accessible_module_ids()
 
 
+def _sync_database_state(connection, settings):
+    _sync_configuration(connection, settings)
+
+    user_ids = [
+        row[0] for row in connection.execute(select(Users.__table__.c.id))
+    ]
+    if get_config("user_mode", default="teams") == "teams":
+        team_ids = [
+            row[0]
+            for row in connection.execute(
+                select(Users.__table__.c.team_id)
+                .where(Users.__table__.c.team_id.isnot(None))
+                .distinct()
+            )
+        ]
+        for team_id in team_ids:
+            _sync_team_connection(connection, team_id, settings)
+    else:
+        for user_id in user_ids:
+            _sync_user_connection(connection, user_id, settings)
+
+    challenge_ids = [
+        row[0] for row in connection.execute(select(Challenges.__table__.c.id))
+    ]
+    for challenge_id in challenge_ids:
+        _sync_challenge_connection(connection, challenge_id, settings)
+
+    return user_ids, challenge_ids
+
+
 def _sync_everything():
     settings = _load_settings()
 
-    # CTFd loads plugins independently in every Gunicorn worker. A MySQL
-    # advisory lock makes the startup/manual reconciliation single-writer.
-    # The lock is connection-scoped and is always explicitly released.
     if db.engine.dialect.name in ("mysql", "mariadb"):
-        with db.engine.connect() as lock_connection:
-            acquired = lock_connection.execute(
-                text("SELECT GET_LOCK(:lock_name, :timeout)"),
-                {
-                    "lock_name": SYNC_LOCK_NAME,
-                    "timeout": SYNC_LOCK_TIMEOUT_SECONDS,
-                },
-            ).scalar()
-
-            if acquired != 1:
-                raise RuntimeError(
-                    "Could not acquire the CTFd Campus Audiences synchronization "
-                    "lock within {} seconds".format(SYNC_LOCK_TIMEOUT_SECONDS)
-                )
-
+        # Hold the advisory lock and run the transaction on the SAME
+        # connection. This also works when SQLAlchemy's pool has size 1.
+        with db.engine.connect() as connection:
+            acquired = None
             try:
-                return _sync_everything_locked(settings)
-            finally:
-                try:
-                    released = lock_connection.execute(
-                        text("SELECT RELEASE_LOCK(:lock_name)"),
-                        {"lock_name": SYNC_LOCK_NAME},
+                with connection.begin():
+                    acquired = connection.execute(
+                        text("SELECT GET_LOCK(:lock_name, :timeout)"),
+                        {
+                            "lock_name": SYNC_LOCK_NAME,
+                            "timeout": SYNC_LOCK_TIMEOUT_SECONDS,
+                        },
                     ).scalar()
-                    if released != 1:
-                        LOGGER.warning(
-                            "MySQL did not confirm release of synchronization lock %s",
+
+                    if acquired != 1:
+                        raise RuntimeError(
+                            "Could not acquire the CTFd Campus Audiences "
+                            "synchronization lock within {} seconds".format(
+                                SYNC_LOCK_TIMEOUT_SECONDS
+                            )
+                        )
+
+                    user_ids, challenge_ids = _sync_database_state(
+                        connection, settings
+                    )
+            finally:
+                if acquired == 1:
+                    try:
+                        released = connection.execute(
+                            text("SELECT RELEASE_LOCK(:lock_name)"),
+                            {"lock_name": SYNC_LOCK_NAME},
+                        ).scalar()
+                        connection.commit()
+                        if released != 1:
+                            LOGGER.warning(
+                                "MySQL did not confirm release of synchronization "
+                                "lock %s",
+                                SYNC_LOCK_NAME,
+                            )
+                    except Exception:
+                        # Closing the connection also releases a MySQL named lock.
+                        LOGGER.exception(
+                            "Failed to explicitly release synchronization lock %s",
                             SYNC_LOCK_NAME,
                         )
-                except Exception:
-                    # Closing the connection also releases a MySQL named lock.
-                    LOGGER.exception(
-                        "Failed to explicitly release synchronization lock %s",
-                        SYNC_LOCK_NAME,
-                    )
-
-    return _sync_everything_locked(settings)
-
-
-def _sync_everything_locked(settings):
-    with db.engine.begin() as connection:
-        _sync_configuration(connection, settings)
-
-        user_ids = [
-            row[0] for row in connection.execute(select(Users.__table__.c.id))
-        ]
-        if get_config("user_mode", default="teams") == "teams":
-            team_ids = [
-                row[0]
-                for row in connection.execute(
-                    select(Users.__table__.c.team_id)
-                    .where(Users.__table__.c.team_id.isnot(None))
-                    .distinct()
-                )
-            ]
-            for team_id in team_ids:
-                _sync_team_connection(connection, team_id, settings)
-        else:
-            for user_id in user_ids:
-                _sync_user_connection(connection, user_id, settings)
-
-        challenge_ids = [
-            row[0] for row in connection.execute(select(Challenges.__table__.c.id))
-        ]
-        for challenge_id in challenge_ids:
-            _sync_challenge_connection(connection, challenge_id, settings)
+    else:
+        with db.engine.begin() as connection:
+            user_ids, challenge_ids = _sync_database_state(connection, settings)
 
     _clear_ctfd_caches()
     LOGGER.info(
@@ -778,7 +788,6 @@ def _sync_everything_locked(settings):
         HAS_NATIVE_AUDIENCES_AND_MODULES and HAS_NATIVE_CHALLENGE_MODULE_FIELD,
     )
     return len(user_ids), len(challenge_ids)
-
 
 def _user_field_changed(mapper, connection, target):
     if target.user_id is not None:
