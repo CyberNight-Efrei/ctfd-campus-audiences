@@ -91,7 +91,6 @@ In Users mode, each user is assigned independently.
 - User Custom Field changes recalculate the affected team's Team Custom Field and audience immediately.
 - Team Custom Fields are derived automatically from member values: the plugin fills the field only when every current member has the same non-empty value (case-insensitive, with surrounding quotes/whitespace normalized). If values differ or any member has no value, the plugin clears the Team Custom Field and removes the team's plugin-managed campus audience.
 - User team changes recalculate the Team Custom Field from the new membership of both the old and new teams.
-- User team changes recalculate both the old and new team's audience.
 - Challenge tag changes update the plugin-managed module assignment immediately.
 - Startup/manual synchronization also processes records that existed before the plugin was installed.
 - The plugin stores ownership markers so it removes only memberships/access links it created. Existing manually-added audience memberships and module access links are preserved.
