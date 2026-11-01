@@ -678,8 +678,20 @@ def _sync_everything():
         user_ids = [
             row[0] for row in connection.execute(select(Users.__table__.c.id))
         ]
-        for user_id in user_ids:
-            _sync_user_connection(connection, user_id, settings)
+        if get_config("user_mode", default="teams") == "teams":
+            team_ids = [
+                row[0]
+                for row in connection.execute(
+                    select(Users.__table__.c.team_id)
+                    .where(Users.__table__.c.team_id.isnot(None))
+                    .distinct()
+                )
+            ]
+            for team_id in team_ids:
+                _sync_team_connection(connection, team_id, settings)
+        else:
+            for user_id in user_ids:
+                _sync_user_connection(connection, user_id, settings)
 
         challenge_ids = [
             row[0] for row in connection.execute(select(Challenges.__table__.c.id))
