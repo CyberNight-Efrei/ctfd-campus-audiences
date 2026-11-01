@@ -476,6 +476,21 @@ def _enforce_challenge_access():
             ):
                 abort(404)
 
+    # Prevent unlocking paid hints/solutions attached to an inaccessible challenge.
+    unlock_tail = _api_v1_path_parts("unlocks")
+    if unlock_tail == [] and request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        target_type = body.get("type")
+        target_id = body.get("target")
+        target_model = {"hints": Hints, "solutions": Solutions}.get(target_type)
+        if target_model is not None and target_id is not None:
+            target = target_model.query.filter_by(id=target_id).first()
+            challenge_id = getattr(target, "challenge_id", None) if target else None
+            if challenge_id is not None and not _can_access_challenge(
+                int(challenge_id), user_id
+            ):
+                abort(404)
+
     # Challenge and solution files can be downloaded directly by URL. Apply
     # the same access check even when the client already has a file URL.
     if request.endpoint == "views.files":
