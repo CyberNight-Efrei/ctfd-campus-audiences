@@ -11,7 +11,7 @@ Plugin for **CTFd 3.8.9** that provides campus-based audience membership and tag
 - Associate each module with one or more audiences.
 - Synchronize existing users and challenges at startup or from the admin plugin page.
 - React automatically to Custom Field entry and challenge tag insert/update/delete events.
-- Restrict challenge list, challenge details, nested challenge APIs, attempts, challenge files, and solution files.
+- Restrict challenge list/details, nested challenge APIs, standalone hint/solution APIs, attempts, challenge files, and solution files.
 - Keep unconfigured challenges public.
 - Deny regular users access to a challenge carrying tags mapped to multiple modules (fail closed).
 - Administrators can still access all challenges.
