@@ -777,11 +777,14 @@ def _sync_everything():
             finally:
                 if acquired == 1:
                     try:
-                        released = connection.execute(
-                            text("SELECT RELEASE_LOCK(:lock_name)"),
-                            {"lock_name": SYNC_LOCK_NAME},
-                        ).scalar()
-                        connection.commit()
+                        # Use begin() as a context manager instead of Connection.commit().
+                        # CTFd 3.8.0's SQLAlchemy connection API may not expose commit().
+                        with connection.begin():
+                            released = connection.execute(
+                                text("SELECT RELEASE_LOCK(:lock_name)"),
+                                {"lock_name": SYNC_LOCK_NAME},
+                            ).scalar()
+
                         if released != 1:
                             LOGGER.warning(
                                 "MySQL did not confirm release of synchronization "
