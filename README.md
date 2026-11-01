@@ -70,6 +70,7 @@ Example \`settings.json\`:
 Rules:
 
 - Mapping keys are case-insensitive and leading/trailing whitespace is ignored.
+- Custom Field values are normalized case-insensitively; surrounding single/double quotes (including JSON-encoded strings such as `"Paris"`) are removed before mapping.
 - \`user_field\` is the name of a **User Custom Field**, not its label in the UI if those differ.
 - \`campus_to_audience\` maps the Custom Field value to an audience name.
 - \`tag_to_module\` maps a challenge tag to a module name.
