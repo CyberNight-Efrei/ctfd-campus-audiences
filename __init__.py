@@ -12,8 +12,6 @@ from CTFd.models import (
     Hints,
     Solutions,
     Tags,
-    TeamFieldEntries,
-    Teams,
     UserFieldEntries,
     Users,
     db,
