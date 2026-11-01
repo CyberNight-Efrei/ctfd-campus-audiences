@@ -9,6 +9,7 @@ from CTFd.models import (
     Challenges,
     Fields,
     Files,
+    Hints,
     Solutions,
     Tags,
     UserFieldEntries,
@@ -422,12 +423,16 @@ def _inaccessible_challenge_ids(user_id):
     }
 
 
-def _challenge_api_path_parts():
+def _api_v1_path_parts(resource):
     parts = [part for part in request.path.split("/") if part]
     for index in range(len(parts) - 2):
-        if parts[index : index + 3] == ["api", "v1", "challenges"]:
+        if parts[index : index + 3] == ["api", "v1", resource]:
             return parts[index + 3 :]
     return None
+
+
+def _challenge_api_path_parts():
+    return _api_v1_path_parts("challenges")
 
 
 def _enforce_challenge_access():
@@ -454,6 +459,22 @@ def _enforce_challenge_access():
                     return None
                 if not _can_access_challenge(challenge_id, user_id):
                     abort(404)
+
+    # Hints and solutions also have standalone ID-based API routes in CTFd
+    # 3.8.9. Guard those routes too, not just /challenges/<id>/... routes.
+    for resource, model in (("hints", Hints), ("solutions", Solutions)):
+        resource_tail = _api_v1_path_parts(resource)
+        if (
+            resource_tail
+            and len(resource_tail) == 1
+            and resource_tail[0].isdigit()
+        ):
+            item = model.query.filter_by(id=int(resource_tail[0])).first_or_404()
+            challenge_id = getattr(item, "challenge_id", None)
+            if challenge_id is None or not _can_access_challenge(
+                int(challenge_id), user_id
+            ):
+                abort(404)
 
     # Challenge and solution files can be downloaded directly by URL. Apply
     # the same access check even when the client already has a file URL.
