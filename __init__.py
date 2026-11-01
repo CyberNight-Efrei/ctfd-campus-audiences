@@ -3,7 +3,7 @@ import logging
 import os
 
 from flask import abort, redirect, request, url_for
-from sqlalchemy import delete, event, select
+from sqlalchemy import and_, delete, event, select
 
 from CTFd.models import (
     Challenges,
@@ -24,73 +24,132 @@ CONFLICT_MODULE_NAME = "__conflicting_tag_mapping__"
 LOGGER = logging.getLogger("ctfd-campus-audiences")
 _MODEL_EVENTS_REGISTERED = False
 
-# CTFd 3.8.9 does not ship native Audience/Module models. These plugin-owned
-# tables provide the same concepts without patching CTFd's core schema.
-class CampusAudience(db.Model):
-    __tablename__ = "campus_audiences"
+# CTFd has native Modules/Audiences on newer commits, but not in the 3.8.0
+# release tag. Detect capabilities from the models instead of version strings.
+try:
+    from CTFd.models import (
+        AudienceMembers as AudienceMemberModel,
+        Audiences as AudienceModel,
+        ModuleAudienceAccess as ModuleAccessModel,
+        Modules as ModuleModel,
+    )
+
+    HAS_NATIVE_AUDIENCES_AND_MODULES = True
+except ImportError:
+    HAS_NATIVE_AUDIENCES_AND_MODULES = False
+
+    class CampusAudience(db.Model):
+        __tablename__ = "campus_audiences"
+
+        id = db.Column(db.Integer, primary_key=True)
+        name = db.Column(db.String(128), nullable=False, unique=True)
+        description = db.Column(db.Text)
+
+    class CampusAudienceMember(db.Model):
+        __tablename__ = "campus_audience_members"
+
+        id = db.Column(db.Integer, primary_key=True)
+        audience_id = db.Column(
+            db.Integer,
+            db.ForeignKey("campus_audiences.id", ondelete="CASCADE"),
+            nullable=False,
+        )
+        user_id = db.Column(
+            db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        )
+
+        __table_args__ = (
+            db.UniqueConstraint(
+                "audience_id", "user_id", name="uq_campus_audience_user"
+            ),
+        )
+
+    class CampusModule(db.Model):
+        __tablename__ = "campus_modules"
+
+        id = db.Column(db.Integer, primary_key=True)
+        name = db.Column(db.String(128), nullable=False, unique=True)
+        description = db.Column(db.Text)
+
+    class CampusModuleAudienceAccess(db.Model):
+        __tablename__ = "campus_module_audience_access"
+
+        id = db.Column(db.Integer, primary_key=True)
+        module_id = db.Column(
+            db.Integer,
+            db.ForeignKey("campus_modules.id", ondelete="CASCADE"),
+            nullable=False,
+        )
+        audience_id = db.Column(
+            db.Integer,
+            db.ForeignKey("campus_audiences.id", ondelete="CASCADE"),
+            nullable=False,
+        )
+
+        __table_args__ = (
+            db.UniqueConstraint(
+                "module_id", "audience_id", name="uq_campus_module_audience"
+            ),
+        )
+
+    AudienceModel = CampusAudience
+    AudienceMemberModel = CampusAudienceMember
+    ModuleModel = CampusModule
+    ModuleAccessModel = CampusModuleAudienceAccess
+
+
+HAS_NATIVE_CHALLENGE_MODULE_FIELD = (
+    hasattr(Challenges, "module_id")
+    and "module_id" in Challenges.__table__.columns
+)
+
+
+# These tables record which memberships/access links/challenge assignments are
+# managed by this plugin. This lets sync remove only its own changes and leave
+# unrelated manual grants intact.
+class CampusManagedAudienceMember(db.Model):
+    __tablename__ = "campus_managed_audience_members"
 
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(128), nullable=False, unique=True)
-
-
-class CampusAudienceMember(db.Model):
-    __tablename__ = "campus_audience_members"
-
-    id = db.Column(db.Integer, primary_key=True)
-    audience_id = db.Column(
-        db.Integer,
-        db.ForeignKey("campus_audiences.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    user_id = db.Column(
-        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-
-    __table_args__ = (
-        db.UniqueConstraint("audience_id", "user_id", name="uq_campus_audience_user"),
-    )
-
-
-class CampusModule(db.Model):
-    __tablename__ = "campus_modules"
-
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(128), nullable=False, unique=True)
-
-
-class CampusModuleAudienceAccess(db.Model):
-    __tablename__ = "campus_module_audience_access"
-
-    id = db.Column(db.Integer, primary_key=True)
-    module_id = db.Column(
-        db.Integer, db.ForeignKey("campus_modules.id", ondelete="CASCADE"), nullable=False
-    )
-    audience_id = db.Column(
-        db.Integer,
-        db.ForeignKey("campus_audiences.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    audience_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
+    created_by_plugin = db.Column(db.Boolean, nullable=False, default=False)
 
     __table_args__ = (
         db.UniqueConstraint(
-            "module_id", "audience_id", name="uq_campus_module_audience"
+            "audience_id", "user_id", name="uq_campus_managed_audience_user"
         ),
     )
 
 
-class CampusModuleChallenge(db.Model):
-    __tablename__ = "campus_module_challenges"
+class CampusManagedModuleAccess(db.Model):
+    __tablename__ = "campus_managed_module_access"
 
     id = db.Column(db.Integer, primary_key=True)
-    module_id = db.Column(
-        db.Integer, db.ForeignKey("campus_modules.id", ondelete="CASCADE"), nullable=False
+    module_id = db.Column(db.Integer, nullable=False)
+    audience_id = db.Column(db.Integer, nullable=False)
+    created_by_plugin = db.Column(db.Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "module_id",
+            "audience_id",
+            name="uq_campus_managed_module_audience",
+        ),
     )
+
+
+class CampusManagedChallenge(db.Model):
+    __tablename__ = "campus_managed_challenges"
+
+    id = db.Column(db.Integer, primary_key=True)
     challenge_id = db.Column(
         db.Integer,
         db.ForeignKey("challenges.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
     )
+    module_id = db.Column(db.Integer, nullable=False)
 
 
 def _settings_path():
@@ -173,7 +232,11 @@ def _ensure_named_row(connection, model, name):
     if row:
         return row[0]
 
-    connection.execute(table.insert().values(name=name))
+    values = {"name": name}
+    if "description" in table.c:
+        values["description"] = "Managed by CTFd Campus Audiences"
+    connection.execute(table.insert().values(**values))
+
     row = connection.execute(
         select(table.c.id).where(table.c.name == name)
     ).first()
@@ -188,9 +251,10 @@ def _sync_configuration(connection, settings):
     module_to_audiences = _module_audience_mapping(settings)
 
     module_names = set(tag_to_module.values())
-    configured_module_audiences = settings.get("module_to_audiences") or {}
+    configured_modules = settings.get("module_to_audiences") or {}
     module_names.update(
-        name for name in configured_module_audiences
+        name
+        for name in configured_modules
         if isinstance(name, str) and name.strip()
     )
     module_names.add(CONFLICT_MODULE_NAME)
@@ -200,31 +264,83 @@ def _sync_configuration(connection, settings):
         audience_names.update(names)
 
     for audience_name in sorted(audience_names):
-        _ensure_named_row(connection, CampusAudience, audience_name)
+        _ensure_named_row(connection, AudienceModel, audience_name)
 
     for module_name in sorted(module_names):
-        _ensure_named_row(connection, CampusModule, module_name)
+        _ensure_named_row(connection, ModuleModel, module_name)
 
-    access_table = CampusModuleAudienceAccess.__table__
-    connection.execute(delete(access_table))
+    access_table = ModuleAccessModel.__table__
+    managed_table = CampusManagedModuleAccess.__table__
 
+    # Remove only access links previously created by this plugin.
+    old_links = connection.execute(
+        select(
+            managed_table.c.module_id,
+            managed_table.c.audience_id,
+            managed_table.c.created_by_plugin,
+        )
+    ).all()
+    for old_link in old_links:
+        if old_link[2]:
+            connection.execute(
+                delete(access_table).where(
+                    and_(
+                        access_table.c.module_id == old_link[0],
+                        access_table.c.audience_id == old_link[1],
+                    )
+                )
+            )
+    connection.execute(delete(managed_table))
+
+    # Rebuild desired links. Existing links not created by the plugin are kept.
     for module_name in sorted(module_names):
         if module_name == CONFLICT_MODULE_NAME:
             continue
+
         configured_audiences = module_to_audiences.get(
             _normalise(module_name), [module_name]
         )
-        module_id = _ensure_named_row(connection, CampusModule, module_name)
+        module_id = _ensure_named_row(connection, ModuleModel, module_name)
 
         for audience_name in configured_audiences:
             audience_id = _ensure_named_row(
-                connection, CampusAudience, audience_name
+                connection, AudienceModel, audience_name
             )
+            existing = connection.execute(
+                select(access_table.c.id).where(
+                    and_(
+                        access_table.c.module_id == module_id,
+                        access_table.c.audience_id == audience_id,
+                    )
+                )
+            ).first()
+
+            created_by_plugin = existing is None
+            if created_by_plugin:
+                values = {
+                    "module_id": module_id,
+                    "audience_id": audience_id,
+                }
+                connection.execute(access_table.insert().values(**values))
+
             connection.execute(
-                access_table.insert().values(
-                    module_id=module_id, audience_id=audience_id
+                managed_table.insert().values(
+                    module_id=module_id,
+                    audience_id=audience_id,
+                    created_by_plugin=created_by_plugin,
                 )
             )
+
+
+def _delete_user_membership(connection, user_id, audience_id):
+    membership_table = AudienceMemberModel.__table__
+    conditions = [
+        membership_table.c.user_id == user_id,
+        membership_table.c.audience_id == audience_id,
+    ]
+    if "team_id" in membership_table.c:
+        conditions.append(membership_table.c.team_id.is_(None))
+    connection.execute(delete(membership_table).where(and_(*conditions)))
 
 
 def _sync_user_connection(connection, user_id, settings):
@@ -250,20 +366,55 @@ def _sync_user_connection(connection, user_id, settings):
     campus_value = row[0] if row else None
     audience_name = campus_to_audience.get(_normalise(campus_value))
 
-    membership_table = CampusAudienceMember.__table__
+    membership_table = AudienceMemberModel.__table__
+    managed_table = CampusManagedAudienceMember.__table__
+
+    old_memberships = connection.execute(
+        select(
+            managed_table.c.audience_id,
+            managed_table.c.created_by_plugin,
+        ).where(managed_table.c.user_id == user_id)
+    ).all()
+
+    for old_membership in old_memberships:
+        if old_membership[1]:
+            _delete_user_membership(connection, user_id, old_membership[0])
+
     connection.execute(
-        delete(membership_table).where(membership_table.c.user_id == user_id)
+        delete(managed_table).where(managed_table.c.user_id == user_id)
     )
 
-    if audience_name:
-        audience_id = _ensure_named_row(
-            connection, CampusAudience, audience_name
+    if not audience_name:
+        return
+
+    audience_id = _ensure_named_row(
+        connection, AudienceModel, audience_name
+    )
+    conditions = [
+        membership_table.c.user_id == user_id,
+        membership_table.c.audience_id == audience_id,
+    ]
+    if "team_id" in membership_table.c:
+        conditions.append(membership_table.c.team_id.is_(None))
+
+    existing = connection.execute(
+        select(membership_table.c.id).where(and_(*conditions))
+    ).first()
+
+    created_by_plugin = existing is None
+    if created_by_plugin:
+        values = {"audience_id": audience_id, "user_id": user_id}
+        if "team_id" in membership_table.c:
+            values["team_id"] = None
+        connection.execute(membership_table.insert().values(**values))
+
+    connection.execute(
+        managed_table.insert().values(
+            audience_id=audience_id,
+            user_id=user_id,
+            created_by_plugin=created_by_plugin,
         )
-        connection.execute(
-            membership_table.insert().values(
-                user_id=user_id, audience_id=audience_id
-            )
-        )
+    )
 
 
 def _sync_challenge_connection(connection, challenge_id, settings):
@@ -273,22 +424,43 @@ def _sync_challenge_connection(connection, challenge_id, settings):
         select(tags.c.value).where(tags.c.challenge_id == challenge_id)
     ).all()
 
-    module_names = {
-        tag_to_module[normalised_tag]
-        for row in rows
-        if (normalised_tag := _normalise(row[0])) in tag_to_module
-    }
+    module_names = set()
+    for row in rows:
+        normalised_tag = _normalise(row[0])
+        if normalised_tag in tag_to_module:
+            module_names.add(tag_to_module[normalised_tag])
+
+    managed_table = CampusManagedChallenge.__table__
+    previous = connection.execute(
+        select(managed_table.c.module_id).where(
+            managed_table.c.challenge_id == challenge_id
+        )
+    ).first()
 
     if not module_names:
+        # When the matching tag is removed, clear a native module assignment
+        # only if it is still the assignment made by this plugin.
+        if previous and HAS_NATIVE_CHALLENGE_MODULE_FIELD:
+            challenge_table = Challenges.__table__
+            current = connection.execute(
+                select(challenge_table.c.module_id).where(
+                    challenge_table.c.id == challenge_id
+                )
+            ).first()
+            if current and current[0] == previous[0]:
+                connection.execute(
+                    challenge_table.update()
+                    .where(challenge_table.c.id == challenge_id)
+                    .values(module_id=None)
+                )
+
         connection.execute(
-            delete(CampusModuleChallenge.__table__).where(
-                CampusModuleChallenge.challenge_id == challenge_id
+            delete(managed_table).where(
+                managed_table.c.challenge_id == challenge_id
             )
         )
         return
 
-    # A challenge with tags mapped to multiple modules is deliberately denied
-    # to regular users instead of accidentally exposing it to either campus.
     if len(module_names) > 1:
         module_name = CONFLICT_MODULE_NAME
         LOGGER.warning(
@@ -299,16 +471,27 @@ def _sync_challenge_connection(connection, challenge_id, settings):
     else:
         module_name = next(iter(module_names))
 
-    module_id = _ensure_named_row(connection, CampusModule, module_name)
-    assignment_table = CampusModuleChallenge.__table__
+    module_id = _ensure_named_row(connection, ModuleModel, module_name)
+
+    # In commits with native Modules support, set Challenges.module_id so
+    # CTFd's own administration and challenge APIs see the assignment.
+    if HAS_NATIVE_CHALLENGE_MODULE_FIELD:
+        challenge_table = Challenges.__table__
+        connection.execute(
+            challenge_table.update()
+            .where(challenge_table.c.id == challenge_id)
+            .values(module_id=module_id)
+        )
+
     connection.execute(
-        delete(assignment_table).where(
-            assignment_table.c.challenge_id == challenge_id
+        delete(managed_table).where(
+            managed_table.c.challenge_id == challenge_id
         )
     )
     connection.execute(
-        assignment_table.insert().values(
-            module_id=module_id, challenge_id=challenge_id
+        managed_table.insert().values(
+            challenge_id=challenge_id,
+            module_id=module_id,
         )
     )
 
@@ -331,9 +514,10 @@ def _sync_everything():
             _sync_challenge_connection(connection, challenge_id, settings)
 
     LOGGER.info(
-        "Campus synchronization completed: %d users, %d challenges",
+        "Campus synchronization completed: %d users, %d challenges (native modules: %s)",
         len(user_ids),
         len(challenge_ids),
+        HAS_NATIVE_AUDIENCES_AND_MODULES and HAS_NATIVE_CHALLENGE_MODULE_FIELD,
     )
     return len(user_ids), len(challenge_ids)
 
@@ -368,58 +552,95 @@ def _current_user_id():
     return getattr(user, "id", None) if user is not None else None
 
 
-def _can_access_challenge(challenge_id, user_id):
-    assignment = CampusModuleChallenge.query.filter_by(
+def _challenge_module_id(challenge_id):
+    if HAS_NATIVE_CHALLENGE_MODULE_FIELD:
+        row = db.session.execute(
+            select(Challenges.__table__.c.module_id).where(
+                Challenges.__table__.c.id == challenge_id
+            )
+        ).first()
+        return row[0] if row else None
+
+    row = CampusManagedChallenge.query.filter_by(
         challenge_id=challenge_id
     ).first()
-    if assignment is None:
+    return row.module_id if row else None
+
+
+def _can_access_challenge(challenge_id, user_id):
+    module_id = _challenge_module_id(challenge_id)
+    if module_id is None:
         return True
 
     if user_id is None:
         return False
 
-    membership = (
-        db.session.query(CampusModuleAudienceAccess.id)
-        .join(
-            CampusAudienceMember,
-            CampusAudienceMember.audience_id
-            == CampusModuleAudienceAccess.audience_id,
+    member_table = AudienceMemberModel.__table__
+    access_table = ModuleAccessModel.__table__
+    conditions = [
+        member_table.c.user_id == user_id,
+        access_table.c.module_id == module_id,
+    ]
+    if "team_id" in member_table.c:
+        conditions.append(member_table.c.team_id.is_(None))
+
+    statement = (
+        select(member_table.c.id)
+        .select_from(
+            member_table.join(
+                access_table,
+                member_table.c.audience_id == access_table.c.audience_id,
+            )
         )
-        .filter(
-            CampusModuleAudienceAccess.module_id == assignment.module_id,
-            CampusAudienceMember.user_id == user_id,
-        )
-        .first()
+        .where(and_(*conditions))
     )
-    return membership is not None
+    return db.session.execute(statement).first() is not None
 
 
 def _inaccessible_challenge_ids(user_id):
-    assignments = CampusModuleChallenge.query.all()
+    if HAS_NATIVE_CHALLENGE_MODULE_FIELD:
+        challenge_table = Challenges.__table__
+        assignments = db.session.execute(
+            select(challenge_table.c.id, challenge_table.c.module_id).where(
+                challenge_table.c.module_id.isnot(None)
+            )
+        ).all()
+    else:
+        assignments = [
+            (row.challenge_id, row.module_id)
+            for row in CampusManagedChallenge.query.all()
+        ]
+
     if not assignments:
         return set()
 
     if user_id is None:
-        return {item.challenge_id for item in assignments}
+        return {row[0] for row in assignments}
 
-    allowed_module_ids = {
-        row[0]
-        for row in (
-            db.session.query(CampusModuleAudienceAccess.module_id)
-            .join(
-                CampusAudienceMember,
-                CampusAudienceMember.audience_id
-                == CampusModuleAudienceAccess.audience_id,
+    member_table = AudienceMemberModel.__table__
+    access_table = ModuleAccessModel.__table__
+    conditions = [member_table.c.user_id == user_id]
+    if "team_id" in member_table.c:
+        conditions.append(member_table.c.team_id.is_(None))
+
+    statement = (
+        select(access_table.c.module_id)
+        .select_from(
+            access_table.join(
+                member_table,
+                member_table.c.audience_id == access_table.c.audience_id,
             )
-            .filter(CampusAudienceMember.user_id == user_id)
-            .all()
         )
+        .where(and_(*conditions))
+    )
+    allowed_module_ids = {
+        row[0] for row in db.session.execute(statement).all()
     }
 
     return {
-        item.challenge_id
-        for item in assignments
-        if item.module_id not in allowed_module_ids
+        challenge_id
+        for challenge_id, module_id in assignments
+        if module_id not in allowed_module_ids
     }
 
 
@@ -441,8 +662,7 @@ def _enforce_challenge_access():
 
     user_id = _current_user_id()
 
-    # Protect details and every nested challenge API endpoint (hints, files,
-    # solves, solution, tags, ratings, requirements, etc.).
+    # Protect challenge details and nested API endpoints.
     tail = _challenge_api_path_parts()
     if tail:
         first = tail[0]
@@ -462,8 +682,7 @@ def _enforce_challenge_access():
                 if not _can_access_challenge(challenge_id, user_id):
                     abort(404)
 
-    # Hints and solutions also have standalone ID-based API routes in CTFd
-    # 3.8.9. Guard those routes too, not just /challenges/<id>/... routes.
+    # CTFd 3.8.0 has standalone hint and solution routes.
     for resource, model in (("hints", Hints), ("solutions", Solutions)):
         resource_tail = _api_v1_path_parts(resource)
         if (
@@ -478,7 +697,7 @@ def _enforce_challenge_access():
             ):
                 abort(404)
 
-    # Prevent unlocking paid hints/solutions attached to an inaccessible challenge.
+    # Paid hint/solution unlock requests must respect module access as well.
     unlock_tail = _api_v1_path_parts("unlocks")
     if unlock_tail == [] and request.method == "POST":
         body = request.get_json(silent=True)
@@ -495,8 +714,7 @@ def _enforce_challenge_access():
             ):
                 abort(404)
 
-    # Challenge and solution files can be downloaded directly by URL. Apply
-    # the same access check even when the client already has a file URL.
+    # Direct challenge and solution file downloads must use the same check.
     if request.endpoint == "views.files":
         file_path = (request.view_args or {}).get("path", "")
         file_record = Files.query.filter_by(location=file_path).first()
@@ -532,13 +750,19 @@ def _filter_challenge_list(response):
     if not inaccessible:
         return response
 
-    payload["data"] = [
-        challenge
-        for challenge in payload["data"]
-        if not isinstance(challenge, dict)
-        or challenge.get("id") is None
-        or int(challenge["id"]) not in inaccessible
-    ]
+    filtered = []
+    for challenge in payload["data"]:
+        if not isinstance(challenge, dict) or challenge.get("id") is None:
+            filtered.append(challenge)
+            continue
+        try:
+            challenge_id = int(challenge["id"])
+        except (TypeError, ValueError):
+            continue
+        if challenge_id not in inaccessible:
+            filtered.append(challenge)
+
+    payload["data"] = filtered
     response.set_data(json.dumps(payload, ensure_ascii=False))
     return response
 
@@ -560,14 +784,14 @@ def _admin_sync():
 
 
 def load(app):
-    """CTFd plugin entry point. Compatible with the CTFd 3.8.9 plugin API."""
+    """Plugin entry point with capability detection for CTFd 3.8.0 and newer."""
     if getattr(app, "_campus_audiences_loaded", False):
         return
     app._campus_audiences_loaded = True
 
-    # Plugins are loaded after CTFd initialized its database. create_all()
-    # creates only the plugin's missing tables; no CTFd core migration is needed.
     with app.app_context():
+        # Creates plugin-owned tracking tables and fallback tables when needed.
+        # Native CTFd tables are already managed by CTFd migrations.
         db.create_all()
         _register_model_events()
         _sync_everything()
