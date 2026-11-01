@@ -22,6 +22,8 @@ jobs:
         run: python -m py_compile __init__.py
       - name: Validate default configuration
         run: python -m json.tool settings.json > /dev/null
+      - name: Test Custom Field value normalization
+        run: python tests/test_normalise.py
       - name: Check compatibility branches are present
         run: |
           grep -q "HAS_NATIVE_AUDIENCES_AND_MODULES" __init__.py

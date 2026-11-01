@@ -225,7 +225,25 @@ def _load_settings():
 def _normalise(value):
     if not isinstance(value, str):
         return None
-    value = value.strip().casefold()
+
+    value = value.strip()
+
+    # Some CTFd Custom Field entries are persisted as JSON string literals,
+    # so a text value such as Paris can arrive from SQL as '"Paris"'.
+    # Decode that representation before applying the mapping lookup.
+    if len(value) >= 2 and value[0] == value[-1]:
+        if value[0] == '"':
+            try:
+                decoded = json.loads(value)
+                if isinstance(decoded, str):
+                    value = decoded.strip()
+            except (TypeError, ValueError):
+                # Be tolerant of legacy rows containing unmatched JSON escapes.
+                value = value[1:-1].strip()
+        elif value[0] == "'":
+            value = value[1:-1].strip()
+
+    value = value.casefold()
     return value or None
 
 
@@ -454,6 +472,56 @@ def _audience_id_for_user(connection, user_id, settings):
     return _ensure_named_row(connection, AudienceModel, audience_name)
 
 
+def _audience_id_for_team(connection, team_id, settings):
+    # A dedicated Team Custom Field takes precedence when it is defined.
+    # Its name defaults to user_field so existing settings.json files keep
+    # working when the admin created the same Campus field for Users and Teams.
+    field_name = settings.get(
+        "team_field", settings.get("user_field", "campus")
+    )
+    campus_to_audience = _normalised_mapping(
+        settings.get("campus_to_audience", {})
+    )
+
+    entries = UserFieldEntries.__table__
+    fields = Fields.__table__
+    field_exists = connection.execute(
+        select(fields.c.id).where(
+            fields.c.type == "team",
+            fields.c.name == field_name,
+        )
+    ).first()
+
+    if field_exists is None:
+        # Backward compatibility: when no matching Team Custom Field is
+        # defined, derive the team's campus from unanimous user fields.
+        return False, None
+
+    statement = (
+        select(entries.c.value)
+        .select_from(entries.join(fields, entries.c.field_id == fields.c.id))
+        .where(
+            entries.c.team_id == team_id,
+            entries.c.type == "team",
+            fields.c.type == "team",
+            fields.c.name == field_name,
+        )
+        .order_by(entries.c.id.desc())
+    )
+    row = connection.execute(statement).first()
+
+    # A configured Team Custom Field is authoritative. An empty or unmapped
+    # value must not silently fall back to members' individual campus values.
+    if row is None:
+        return True, None
+
+    audience_name = campus_to_audience.get(_normalise(row[0]))
+    if not audience_name:
+        return True, None
+
+    return True, _ensure_named_row(connection, AudienceModel, audience_name)
+
+
 def _sync_user_membership(connection, user_id, audience_id):
     membership_table = AudienceMemberModel.__table__
     managed_table = CampusManagedAudienceMember.__table__
@@ -565,25 +633,33 @@ def _sync_team_membership(connection, team_id, audience_id):
 
 
 def _sync_team_connection(connection, team_id, settings):
-    user_ids = [
-        row[0]
-        for row in connection.execute(
-            select(Users.__table__.c.id).where(
-                Users.__table__.c.team_id == team_id
-            )
-        ).all()
-    ]
+    # Prefer the explicit Team Custom Field, if one is configured. This allows
+    # a team to have its own campus even when its members have no user field or
+    # are not all assigned the same individual campus.
+    has_team_field, target_audience_id = _audience_id_for_team(
+        connection, team_id, settings
+    )
 
-    # Team mode shares challenge access. Only grant a campus audience if every
-    # member of the team resolves to the same configured campus.
-    resolved_audiences = {
-        _audience_id_for_user(connection, user_id, settings)
-        for user_id in user_ids
-    }
-    if len(user_ids) == 0 or len(resolved_audiences) != 1:
-        target_audience_id = None
-    else:
-        target_audience_id = next(iter(resolved_audiences))
+    if not has_team_field:
+        user_ids = [
+            row[0]
+            for row in connection.execute(
+                select(Users.__table__.c.id).where(
+                    Users.__table__.c.team_id == team_id
+                )
+            ).all()
+        ]
+
+        # Backward compatibility for installations without a Team Custom Field:
+        # require all current members to resolve to the same configured campus.
+        resolved_audiences = {
+            _audience_id_for_user(connection, user_id, settings)
+            for user_id in user_ids
+        }
+        if len(user_ids) == 0 or len(resolved_audiences) != 1:
+            target_audience_id = None
+        else:
+            target_audience_id = next(iter(resolved_audiences))
 
     _sync_team_membership(connection, team_id, target_audience_id)
 
@@ -722,15 +798,32 @@ def _sync_database_state(connection, settings):
         row[0] for row in connection.execute(select(Users.__table__.c.id))
     ]
     if get_config("user_mode", default="teams") == "teams":
-        team_ids = [
+        team_ids = {
             row[0]
             for row in connection.execute(
                 select(Users.__table__.c.team_id)
                 .where(Users.__table__.c.team_id.isnot(None))
                 .distinct()
             )
-        ]
-        for team_id in team_ids:
+        }
+
+        # Include teams that have a Team Custom Field entry as well, even if
+        # they are not returned by the current user-membership query.
+        entry_table = UserFieldEntries.__table__
+        if "team_id" in entry_table.c and "type" in entry_table.c:
+            team_ids.update(
+                row[0]
+                for row in connection.execute(
+                    select(entry_table.c.team_id)
+                    .where(
+                        entry_table.c.type == "team",
+                        entry_table.c.team_id.isnot(None),
+                    )
+                    .distinct()
+                )
+            )
+
+        for team_id in sorted(team_ids):
             _sync_team_connection(connection, team_id, settings)
     else:
         for user_id in user_ids:
@@ -812,8 +905,22 @@ def _sync_everything():
 
 
 def _user_field_changed(mapper, connection, target):
+    settings = _load_settings()
+    changed = False
+
     if target.user_id is not None:
-        _sync_user_connection(connection, target.user_id, _load_settings())
+        _sync_user_connection(connection, target.user_id, settings)
+        changed = True
+
+    # CTFd stores Team Custom Field entries in field_entries with type='team'
+    # and team_id set (user_id is NULL). Reconcile that team on insert/update/
+    # delete so changing the team's Campus value takes effect immediately.
+    team_id = getattr(target, "team_id", None)
+    if team_id is not None and get_config("user_mode", default="teams") == "teams":
+        _sync_team_connection(connection, team_id, settings)
+        changed = True
+
+    if changed:
         _clear_ctfd_caches()
 
 

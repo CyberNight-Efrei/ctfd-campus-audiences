@@ -50,7 +50,8 @@ Example \`settings.json\`:
 
 \`\`\`json
 {
-  "user_field": "campus",
+  "user_field": "Campus",
+  "team_field": "Campus",
   "campus_to_audience": {
     "paris": "Paris",
     "bordeaux": "Bordeaux"
@@ -69,6 +70,7 @@ Example \`settings.json\`:
 Rules:
 
 - Mapping keys are case-insensitive and leading/trailing whitespace is ignored.
+- Custom Field values are normalized case-insensitively; surrounding single/double quotes (including JSON-encoded strings such as `"Paris"`) are removed before mapping.
 - \`user_field\` is the name of a **User Custom Field**, not its label in the UI if those differ.
 - \`campus_to_audience\` maps the Custom Field value to an audience name.
 - \`tag_to_module\` maps a challenge tag to a module name.
@@ -80,13 +82,14 @@ Rules:
 
 ## Teams mode behavior
 
-CTFd's Teams mode shares solves and challenge access across the team. To avoid granting a team access to multiple campus challenge sets, the plugin only adds a team to an audience when every member of that team has a Custom Field value that maps to the same audience. If members resolve to different audiences, or any member has no matching value, the team receives no plugin-managed campus audience.
+CTFd's Teams mode shares solves and challenge access across the team. When a matching Team Custom Field exists (`team_field`, defaulting to `user_field`), the plugin uses that team's value to assign the team to one audience. The team must still contain the players who should inherit that access. An empty or unmapped Team Custom Field gives the team no campus audience. If no matching Team Custom Field exists, the compatibility fallback only adds the team to an audience when every member has a Custom Field value that maps to the same audience.
 
 In Users mode, each user is assigned independently.
 
 ## Synchronization and ownership
 
 - User Custom Field changes update the affected user or team membership immediately.
+- Team Custom Field changes update the affected team's audience membership immediately.
 - User team changes recalculate both the old and new team's audience.
 - Challenge tag changes update the plugin-managed module assignment immediately.
 - Startup/manual synchronization also processes records that existed before the plugin was installed.

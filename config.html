@@ -36,15 +36,19 @@
       </p>
       <ul>
         <li><code>user_field</code> : nom du Custom Field utilisateur.</li>
+        <li><code>team_field</code> : nom du Custom Field équipe (par défaut : même nom que <code>user_field</code>).</li>
         <li><code>campus_to_audience</code> : valeur du champ vers nom d'audience.</li>
         <li><code>tag_to_module</code> : tag vers nom du module.</li>
         <li><code>module_to_audiences</code> : audiences autorisées pour chaque module.</li>
       </ul>
 
       <div class="alert alert-info">
-        En mode Teams, une équipe ne reçoit une audience que si tous ses membres
-        correspondent à la même audience campus. En cas de campus manquant ou
-        différent au sein de l'équipe, aucun accès campus n'est accordé.
+        En mode Teams, si un Custom Field équipe correspondant à
+        <code>team_field</code> existe, sa valeur détermine directement
+        l'audience de l'équipe. Les joueurs héritent de cet accès uniquement
+        s'ils appartiennent réellement à cette équipe. Si aucun Custom Field
+        équipe correspondant n'existe, le plugin conserve le comportement de
+        compatibilité : tous les membres doivent avoir le même campus.
       </div>
 
       <div class="alert alert-warning">
