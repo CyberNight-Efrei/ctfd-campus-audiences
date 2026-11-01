@@ -345,6 +345,23 @@ def _sync_configuration(connection, settings):
         if pair in desired_links:
             # This relation is still configured; do not delete/reinsert it.
             managed_pairs.add(pair)
+            if old_link[2]:
+                # Repair a plugin-managed relation if it was removed externally.
+                existing = connection.execute(
+                    select(access_table.c.id).where(
+                        and_(
+                            access_table.c.module_id == pair[0],
+                            access_table.c.audience_id == pair[1],
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    connection.execute(
+                        access_table.insert().values(
+                            module_id=pair[0],
+                            audience_id=pair[1],
+                        )
+                    )
             continue
 
         # Remove only a stale relation that this plugin originally created.
@@ -395,6 +412,7 @@ def _sync_configuration(connection, settings):
                 created_by_plugin=created_by_plugin,
             )
         )
+
 
 def _delete_membership(connection, model, account_field, account_id, audience_id):
     membership_table = model.__table__
@@ -788,6 +806,7 @@ def _sync_everything():
         HAS_NATIVE_AUDIENCES_AND_MODULES and HAS_NATIVE_CHALLENGE_MODULE_FIELD,
     )
     return len(user_ids), len(challenge_ids)
+
 
 def _user_field_changed(mapper, connection, target):
     if target.user_id is not None:
