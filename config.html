@@ -4,14 +4,22 @@
       <h2>Campus Audiences</h2>
       <p>
         Ce plugin synchronise les audiences des joueurs depuis un Custom Field
-        et range les challenges dans des modules en fonction de leurs tags.
+        et affecte les challenges aux modules à partir de leurs tags.
+      </p>
+
+      <h4>Compatibilité CTFd</h4>
+      <p>
+        Le plugin détecte les capacités de ton checkout. Si les modèles
+        natifs Audiences/Modules et le champ Challenges.module_id existent,
+        il utilise les tables natives de CTFd. Sinon, il utilise ses propres
+        tables de compatibilité (notamment pour le tag officiel 3.8.0).
       </p>
 
       <h4>Synchronisation</h4>
       <p>
         Une synchronisation complète est effectuée au démarrage de CTFd.
-        Les changements de Custom Fields et de tags sont ensuite traités
-        automatiquement.
+        Les changements de Custom Fields, d'appartenance aux équipes et de tags
+        sont ensuite traités automatiquement.
       </p>
       <form method="POST" action="{{ url_for('ctfd_campus_audiences.sync') }}">
         <input type="hidden" name="nonce" value="{{ session.get('nonce', '') }}">
@@ -23,9 +31,8 @@
       <hr>
       <h4>Configuration</h4>
       <p>
-        Modifie le fichier <code>settings.json</code> dans le répertoire du
-        plugin, puis utilise le bouton ci-dessus pour réappliquer la
-        configuration.
+        Modifie <code>settings.json</code> dans le répertoire du plugin,
+        puis utilise le bouton ci-dessus pour réappliquer la configuration.
       </p>
       <ul>
         <li><code>user_field</code> : nom du Custom Field utilisateur.</li>
@@ -35,17 +42,16 @@
       </ul>
 
       <div class="alert alert-info">
-        Les challenges sans tag configuré restent publics. Si plusieurs tags
-        d'un challenge correspondent à des modules différents, le challenge
-        est placé dans un module de conflit inaccessible aux joueurs.
-        Les administrateurs conservent l'accès à tous les challenges.
+        En mode Teams, une équipe ne reçoit une audience que si tous ses membres
+        correspondent à la même audience campus. En cas de campus manquant ou
+        différent au sein de l'équipe, aucun accès campus n'est accordé.
       </div>
 
-      <p>
-        <strong>CTFd 3.8.9 :</strong> les audiences et modules sont stockés dans
-        des tables propres au plugin ; cette version de CTFd ne fournit pas
-        encore ces modèles nativement.
-      </p>
+      <div class="alert alert-warning">
+        Si ton checkout ne contient pas les modèles natifs Audiences/Modules,
+        les modules et audiences restent gérés dans les tables internes du plugin
+        et ne sont pas affichés dans l'interface d'administration native de CTFd.
+      </div>
     </div>
   </div>
 </div>

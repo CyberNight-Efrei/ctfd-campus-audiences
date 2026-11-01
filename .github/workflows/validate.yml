@@ -9,12 +9,21 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.11"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Compile plugin
         run: python -m py_compile __init__.py
       - name: Validate default configuration
         run: python -m json.tool settings.json > /dev/null
+      - name: Check compatibility branches are present
+        run: |
+          grep -q "HAS_NATIVE_AUDIENCES_AND_MODULES" __init__.py
+          grep -q "CampusAudience" __init__.py
+          grep -q "def _sync_team_connection" __init__.py
