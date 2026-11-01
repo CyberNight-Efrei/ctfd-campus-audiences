@@ -12,10 +12,13 @@ from CTFd.models import (
     Hints,
     Solutions,
     Tags,
+    TeamFieldEntries,
+    Teams,
     UserFieldEntries,
     Users,
     db,
 )
+from CTFd.utils import get_config
 from CTFd.utils.decorators import admins_only
 from CTFd.utils.user import get_current_user, is_admin
 
@@ -34,6 +37,7 @@ try:
         Modules as ModuleModel,
     )
 
+    TeamAudienceMemberModel = AudienceMemberModel
     HAS_NATIVE_AUDIENCES_AND_MODULES = True
 except ImportError:
     HAS_NATIVE_AUDIENCES_AND_MODULES = False
@@ -61,6 +65,25 @@ except ImportError:
         __table_args__ = (
             db.UniqueConstraint(
                 "audience_id", "user_id", name="uq_campus_audience_user"
+            ),
+        )
+
+    class CampusTeamAudienceMember(db.Model):
+        __tablename__ = "campus_team_audience_members"
+
+        id = db.Column(db.Integer, primary_key=True)
+        audience_id = db.Column(
+            db.Integer,
+            db.ForeignKey("campus_audiences.id", ondelete="CASCADE"),
+            nullable=False,
+        )
+        team_id = db.Column(
+            db.Integer, db.ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+        )
+
+        __table_args__ = (
+            db.UniqueConstraint(
+                "audience_id", "team_id", name="uq_campus_audience_team"
             ),
         )
 
@@ -94,6 +117,7 @@ except ImportError:
 
     AudienceModel = CampusAudience
     AudienceMemberModel = CampusAudienceMember
+    TeamAudienceMemberModel = CampusTeamAudienceMember
     ModuleModel = CampusModule
     ModuleAccessModel = CampusModuleAudienceAccess
 
@@ -118,6 +142,21 @@ class CampusManagedAudienceMember(db.Model):
     __table_args__ = (
         db.UniqueConstraint(
             "audience_id", "user_id", name="uq_campus_managed_audience_user"
+        ),
+    )
+
+
+class CampusManagedTeamAudienceMember(db.Model):
+    __tablename__ = "campus_managed_team_audience_members"
+
+    id = db.Column(db.Integer, primary_key=True)
+    audience_id = db.Column(db.Integer, nullable=False)
+    team_id = db.Column(db.Integer, nullable=False)
+    created_by_plugin = db.Column(db.Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "audience_id", "team_id", name="uq_campus_managed_audience_team"
         ),
     )
 
@@ -332,18 +371,20 @@ def _sync_configuration(connection, settings):
             )
 
 
-def _delete_user_membership(connection, user_id, audience_id):
-    membership_table = AudienceMemberModel.__table__
+def _delete_membership(connection, model, account_field, account_id, audience_id):
+    membership_table = model.__table__
     conditions = [
-        membership_table.c.user_id == user_id,
+        membership_table.c[account_field] == account_id,
         membership_table.c.audience_id == audience_id,
     ]
-    if "team_id" in membership_table.c:
+    if "team_id" in membership_table.c and account_field == "user_id":
         conditions.append(membership_table.c.team_id.is_(None))
+    if "user_id" in membership_table.c and account_field == "team_id":
+        conditions.append(membership_table.c.user_id.is_(None))
     connection.execute(delete(membership_table).where(and_(*conditions)))
 
 
-def _sync_user_connection(connection, user_id, settings):
+def _audience_id_for_user(connection, user_id, settings):
     field_name = settings.get("user_field", "campus")
     campus_to_audience = _normalised_mapping(
         settings.get("campus_to_audience", {})
@@ -365,7 +406,12 @@ def _sync_user_connection(connection, user_id, settings):
     row = connection.execute(statement).first()
     campus_value = row[0] if row else None
     audience_name = campus_to_audience.get(_normalise(campus_value))
+    if not audience_name:
+        return None
+    return _ensure_named_row(connection, AudienceModel, audience_name)
 
+
+def _sync_user_membership(connection, user_id, audience_id):
     membership_table = AudienceMemberModel.__table__
     managed_table = CampusManagedAudienceMember.__table__
 
@@ -378,18 +424,21 @@ def _sync_user_connection(connection, user_id, settings):
 
     for old_membership in old_memberships:
         if old_membership[1]:
-            _delete_user_membership(connection, user_id, old_membership[0])
+            _delete_membership(
+                connection,
+                AudienceMemberModel,
+                "user_id",
+                user_id,
+                old_membership[0],
+            )
 
     connection.execute(
         delete(managed_table).where(managed_table.c.user_id == user_id)
     )
 
-    if not audience_name:
+    if audience_id is None:
         return
 
-    audience_id = _ensure_named_row(
-        connection, AudienceModel, audience_name
-    )
     conditions = [
         membership_table.c.user_id == user_id,
         membership_table.c.audience_id == audience_id,
@@ -415,6 +464,121 @@ def _sync_user_connection(connection, user_id, settings):
             created_by_plugin=created_by_plugin,
         )
     )
+
+
+def _sync_team_membership(connection, team_id, audience_id):
+    membership_table = TeamAudienceMemberModel.__table__
+    managed_table = CampusManagedTeamAudienceMember.__table__
+
+    old_memberships = connection.execute(
+        select(
+            managed_table.c.audience_id,
+            managed_table.c.created_by_plugin,
+        ).where(managed_table.c.team_id == team_id)
+    ).all()
+
+    for old_membership in old_memberships:
+        if old_membership[1]:
+            _delete_membership(
+                connection,
+                TeamAudienceMemberModel,
+                "team_id",
+                team_id,
+                old_membership[0],
+            )
+
+    connection.execute(
+        delete(managed_table).where(managed_table.c.team_id == team_id)
+    )
+
+    if audience_id is None:
+        return
+
+    conditions = [
+        membership_table.c.team_id == team_id,
+        membership_table.c.audience_id == audience_id,
+    ]
+    if "user_id" in membership_table.c:
+        conditions.append(membership_table.c.user_id.is_(None))
+
+    existing = connection.execute(
+        select(membership_table.c.id).where(and_(*conditions))
+    ).first()
+
+    created_by_plugin = existing is None
+    if created_by_plugin:
+        values = {"audience_id": audience_id, "team_id": team_id}
+        if "user_id" in membership_table.c:
+            values["user_id"] = None
+        connection.execute(membership_table.insert().values(**values))
+
+    connection.execute(
+        managed_table.insert().values(
+            audience_id=audience_id,
+            team_id=team_id,
+            created_by_plugin=created_by_plugin,
+        )
+    )
+
+
+def _sync_team_connection(connection, team_id, settings):
+    user_ids = [
+        row[0]
+        for row in connection.execute(
+            select(Users.__table__.c.id).where(
+                Users.__table__.c.team_id == team_id
+            )
+        ).all()
+    ]
+
+    # Team mode shares challenge access. Only grant a campus audience if every
+    # member of the team resolves to the same configured campus.
+    resolved_audiences = {
+        _audience_id_for_user(connection, user_id, settings)
+        for user_id in user_ids
+    }
+    if len(user_ids) == 0 or len(resolved_audiences) != 1:
+        target_audience_id = None
+    else:
+        target_audience_id = next(iter(resolved_audiences))
+
+    _sync_team_membership(connection, team_id, target_audience_id)
+
+
+def _sync_user_connection(connection, user_id, settings):
+    user_mode = get_config("user_mode", default="teams")
+    if user_mode == "teams":
+        row = connection.execute(
+            select(Users.__table__.c.team_id).where(
+                Users.__table__.c.id == user_id
+            )
+        ).first()
+        team_id = row[0] if row else None
+        if team_id is not None:
+            _sync_team_connection(connection, team_id, settings)
+        return
+
+    target_audience_id = _audience_id_for_user(connection, user_id, settings)
+    _sync_user_membership(connection, user_id, target_audience_id)
+
+
+def _user_team_changed(mapper, connection, target):
+    team_ids = set()
+    try:
+        from sqlalchemy import inspect
+
+        history = inspect(target).attrs.team_id.history
+        team_ids.update(value for value in history.deleted if value is not None)
+        team_ids.update(value for value in history.added if value is not None)
+    except Exception:
+        pass
+
+    if getattr(target, "team_id", None) is not None:
+        team_ids.add(target.team_id)
+
+    settings = _load_settings()
+    for team_id in team_ids:
+        _sync_team_connection(connection, team_id, settings)
 
 
 def _sync_challenge_connection(connection, challenge_id, settings):
@@ -543,6 +707,7 @@ def _register_model_events():
     for action in ("after_insert", "after_update", "after_delete"):
         event.listen(UserFieldEntries, action, _user_field_changed)
         event.listen(Tags, action, _tag_changed)
+        event.listen(Users, action, _user_team_changed)
 
     _MODEL_EVENTS_REGISTERED = True
 
@@ -575,14 +740,29 @@ def _can_access_challenge(challenge_id, user_id):
     if user_id is None:
         return False
 
-    member_table = AudienceMemberModel.__table__
+    user_mode = get_config("user_mode", default="teams")
+    if user_mode == "teams":
+        user = Users.query.filter_by(id=user_id).first()
+        account_id = user.team_id if user else None
+        member_table = TeamAudienceMemberModel.__table__
+        account_column = "team_id"
+    else:
+        account_id = user_id
+        member_table = AudienceMemberModel.__table__
+        account_column = "user_id"
+
+    if account_id is None:
+        return False
+
     access_table = ModuleAccessModel.__table__
     conditions = [
-        member_table.c.user_id == user_id,
+        member_table.c[account_column] == account_id,
         access_table.c.module_id == module_id,
     ]
-    if "team_id" in member_table.c:
+    if "team_id" in member_table.c and account_column == "user_id":
         conditions.append(member_table.c.team_id.is_(None))
+    if "user_id" in member_table.c and account_column == "team_id":
+        conditions.append(member_table.c.user_id.is_(None))
 
     statement = (
         select(member_table.c.id)
@@ -617,11 +797,26 @@ def _inaccessible_challenge_ids(user_id):
     if user_id is None:
         return {row[0] for row in assignments}
 
-    member_table = AudienceMemberModel.__table__
+    user_mode = get_config("user_mode", default="teams")
+    if user_mode == "teams":
+        user = Users.query.filter_by(id=user_id).first()
+        account_id = user.team_id if user else None
+        member_table = TeamAudienceMemberModel.__table__
+        account_column = "team_id"
+    else:
+        account_id = user_id
+        member_table = AudienceMemberModel.__table__
+        account_column = "user_id"
+
+    if account_id is None:
+        return {row[0] for row in assignments}
+
     access_table = ModuleAccessModel.__table__
-    conditions = [member_table.c.user_id == user_id]
-    if "team_id" in member_table.c:
+    conditions = [member_table.c[account_column] == account_id]
+    if "team_id" in member_table.c and account_column == "user_id":
         conditions.append(member_table.c.team_id.is_(None))
+    if "user_id" in member_table.c and account_column == "team_id":
+        conditions.append(member_table.c.user_id.is_(None))
 
     statement = (
         select(access_table.c.module_id)
