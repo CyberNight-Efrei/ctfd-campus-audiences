@@ -660,6 +660,18 @@ def _sync_challenge_connection(connection, challenge_id, settings):
     )
 
 
+def _clear_ctfd_caches():
+    from CTFd.cache import clear_challenges
+
+    clear_challenges()
+    try:
+        from CTFd.cache import clear_accessible_module_ids
+    except ImportError:
+        # CTFd 3.8.0 predates native module-access cache helpers.
+        return
+    clear_accessible_module_ids()
+
+
 def _sync_everything():
     settings = _load_settings()
     with db.engine.begin() as connection:
@@ -677,6 +689,7 @@ def _sync_everything():
         for challenge_id in challenge_ids:
             _sync_challenge_connection(connection, challenge_id, settings)
 
+    _clear_ctfd_caches()
     LOGGER.info(
         "Campus synchronization completed: %d users, %d challenges (native modules: %s)",
         len(user_ids),
@@ -689,6 +702,7 @@ def _sync_everything():
 def _user_field_changed(mapper, connection, target):
     if target.user_id is not None:
         _sync_user_connection(connection, target.user_id, _load_settings())
+        _clear_ctfd_caches()
 
 
 def _tag_changed(mapper, connection, target):
@@ -696,6 +710,7 @@ def _tag_changed(mapper, connection, target):
         _sync_challenge_connection(
             connection, target.challenge_id, _load_settings()
         )
+        _clear_ctfd_caches()
 
 
 def _register_model_events():
