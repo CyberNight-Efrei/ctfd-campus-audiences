@@ -251,13 +251,17 @@ def _normalise(value):
 
 
 def _unanimous_custom_field_value(values, member_count):
-    # A team field is populated only when every member has a non-empty value
-    # and all values agree after the same normalization used by the mappings.
-    if member_count <= 0 or len(values) != member_count:
+    # Empty values do not create a conflict: at least one member must provide
+    # a campus, and every non-empty campus must agree after normalization.
+    if member_count <= 0:
         return None
 
-    cleaned_values = [_clean_custom_field_value(value) for value in values]
-    if any(value is None for value in cleaned_values):
+    cleaned_values = [
+        cleaned
+        for cleaned in (_clean_custom_field_value(value) for value in values)
+        if cleaned is not None
+    ]
+    if not cleaned_values:
         return None
 
     if len({_normalise(value) for value in cleaned_values}) != 1:
