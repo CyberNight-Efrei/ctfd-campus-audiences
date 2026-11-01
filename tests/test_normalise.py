@@ -33,16 +33,20 @@ assert normalise(" Bordeaux ") == "bordeaux"
 assert normalise("") is None
 assert normalise(None) is None
 
-# The Team Custom Field is filled only when every member has the same value.
+# The Team Custom Field is filled when at least one member has a campus
+# and every non-empty campus agrees.
 assert unanimous(["Paris", "Paris"], 2) == "Paris"
 assert unanimous(['"Paris"', "paris"], 2) == "Paris"
 assert unanimous([" Bordeaux ", "Bordeaux"], 2) == "Bordeaux"
+assert unanimous(["Paris", None], 2) == "Paris"
+assert unanimous(["Paris", ""], 2) == "Paris"
+assert unanimous(["Paris", None, "Paris"], 3) == "Paris"
 
-# Different campuses, missing values, and empty teams must leave it blank.
+# Different non-empty campuses conflict; no campus values means no assignment.
 assert unanimous(["Paris", "Bordeaux"], 2) is None
-assert unanimous(["Paris", None], 2) is None
-assert unanimous(["Paris", ""], 2) is None
-assert unanimous(["Paris"], 2) is None
+assert unanimous(["Paris", "Bordeaux", None], 3) is None
+assert unanimous([None, ""], 2) is None
+assert unanimous(["Paris"], 0) is None
 assert unanimous([], 0) is None
 assert clean('"Paris"') == "Paris"
 
