@@ -43,12 +43,17 @@
       </ul>
 
       <div class="alert alert-info">
-        En mode Teams, si un Custom Field équipe correspondant à
-        <code>team_field</code> existe, sa valeur détermine directement
-        l'audience de l'équipe. Les joueurs héritent de cet accès uniquement
-        s'ils appartiennent réellement à cette équipe. Si aucun Custom Field
-        équipe correspondant n'existe, le plugin conserve le comportement de
-        compatibilité : tous les membres doivent avoir le même campus.
+        En mode Teams, le plugin renseigne automatiquement le Custom Field
+        équipe <code>team_field</code> (par défaut le même nom que
+        <code>user_field</code>) à partir des Custom Fields des membres.
+        Le champ est rempli uniquement si tous les membres ont une valeur
+        non vide et identique. Si les valeurs divergent ou si un membre n'a
+        pas de valeur, le champ de l'équipe est vidé et aucune audience de
+        campus ne lui est attribuée. Le champ équipe est donc calculé depuis
+        les champs utilisateurs : il ne doit pas être renseigné manuellement.
+        Si aucun Custom Field équipe correspondant n'existe, le plugin utilise
+        le comportement de compatibilité et calcule directement l'audience
+        depuis les valeurs unanimes des membres.
       </div>
 
       <div class="alert alert-warning">

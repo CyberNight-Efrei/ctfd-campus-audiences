@@ -222,15 +222,14 @@ def _load_settings():
     return settings
 
 
-def _normalise(value):
+def _clean_custom_field_value(value):
     if not isinstance(value, str):
         return None
 
     value = value.strip()
 
-    # Some CTFd Custom Field entries are persisted as JSON string literals,
-    # so a text value such as Paris can arrive from SQL as '"Paris"'.
-    # Decode that representation before applying the mapping lookup.
+    # Some CTFd Custom Field entries are persisted as JSON string literals.
+    # Decode them so the team field receives the actual display value.
     if len(value) >= 2 and value[0] == value[-1]:
         if value[0] == '"':
             try:
@@ -243,8 +242,28 @@ def _normalise(value):
         elif value[0] == "'":
             value = value[1:-1].strip()
 
-    value = value.casefold()
     return value or None
+
+
+def _normalise(value):
+    value = _clean_custom_field_value(value)
+    return value.casefold() if value else None
+
+
+def _unanimous_custom_field_value(values, member_count):
+    # A team field is populated only when every member has a non-empty value
+    # and all values agree after the same normalization used by the mappings.
+    if member_count <= 0 or len(values) != member_count:
+        return None
+
+    cleaned_values = [_clean_custom_field_value(value) for value in values]
+    if any(value is None for value in cleaned_values):
+        return None
+
+    if len({_normalise(value) for value in cleaned_values}) != 1:
+        return None
+
+    return cleaned_values[0]
 
 
 def _normalised_mapping(mapping):
@@ -632,10 +651,124 @@ def _sync_team_membership(connection, team_id, audience_id):
     )
 
 
+def _sync_team_custom_field_from_users(connection, team_id, settings):
+    """Set the Team Custom Field from unanimous User Custom Field values.
+
+    Returns True when the configured Team Custom Field exists. In that case,
+    the field is fully managed from its members: conflicts or missing values
+    remove its entry so stale/manual values cannot override the conflict.
+    """
+    user_field_name = settings.get("user_field", "campus")
+    team_field_name = settings.get(
+        "team_field", settings.get("user_field", "campus")
+    )
+    if not isinstance(user_field_name, str) or not user_field_name.strip():
+        return False
+    if not isinstance(team_field_name, str) or not team_field_name.strip():
+        return False
+
+    fields = Fields.__table__
+    entries = UserFieldEntries.__table__
+
+    team_field = connection.execute(
+        select(fields.c.id).where(
+            fields.c.type == "team",
+            fields.c.name == team_field_name,
+        )
+    ).first()
+    if team_field is None:
+        return False
+
+    user_field = connection.execute(
+        select(fields.c.id).where(
+            fields.c.type == "user",
+            fields.c.name == user_field_name,
+        )
+    ).first()
+
+    member_ids = [
+        row[0]
+        for row in connection.execute(
+            select(Users.__table__.c.id)
+            .where(Users.__table__.c.team_id == team_id)
+            .order_by(Users.__table__.c.id)
+        ).all()
+    ]
+
+    values_by_user = {}
+    if user_field is not None and member_ids:
+        rows = connection.execute(
+            select(entries.c.user_id, entries.c.value)
+            .where(
+                entries.c.field_id == user_field[0],
+                entries.c.type == "user",
+                entries.c.user_id.in_(member_ids),
+            )
+            .order_by(entries.c.id.desc())
+        ).all()
+
+        # Match _audience_id_for_user: the most recently inserted entry wins
+        # if legacy data contains more than one row for the same user/field.
+        for user_id, value in rows:
+            values_by_user.setdefault(user_id, value)
+
+    member_values = [values_by_user.get(user_id) for user_id in member_ids]
+    team_value = _unanimous_custom_field_value(
+        member_values, len(member_ids)
+    )
+
+    conditions = [
+        entries.c.field_id == team_field[0],
+        entries.c.team_id == team_id,
+        entries.c.type == "team",
+    ]
+    if "user_id" in entries.c:
+        conditions.append(entries.c.user_id.is_(None))
+
+    existing_rows = connection.execute(
+        select(entries.c.id)
+        .where(and_(*conditions))
+        .order_by(entries.c.id.desc())
+    ).all()
+
+    if team_value is None:
+        # No consensus: leave the Team Custom Field genuinely empty.
+        connection.execute(delete(entries).where(and_(*conditions)))
+        return True
+
+    if existing_rows:
+        # Keep the newest row and remove any duplicate legacy rows.
+        keep_id = existing_rows[0][0]
+        connection.execute(
+            entries.update()
+            .where(entries.c.id == keep_id)
+            .values(value=team_value)
+        )
+        duplicate_ids = [row[0] for row in existing_rows[1:]]
+        if duplicate_ids:
+            connection.execute(
+                delete(entries).where(entries.c.id.in_(duplicate_ids))
+            )
+    else:
+        values = {
+            "field_id": team_field[0],
+            "team_id": team_id,
+            "type": "team",
+            "value": team_value,
+        }
+        if "user_id" in entries.c:
+            values["user_id"] = None
+        connection.execute(entries.insert().values(**values))
+
+    return True
+
+
 def _sync_team_connection(connection, team_id, settings):
-    # Prefer the explicit Team Custom Field, if one is configured. This allows
-    # a team to have its own campus even when its members have no user field or
-    # are not all assigned the same individual campus.
+    # When a matching Team Custom Field exists, derive its value from the
+    # members' User Custom Fields before using it for the audience assignment.
+    # A disagreement (or a missing member value) leaves the team field empty.
+    _sync_team_custom_field_from_users(connection, team_id, settings)
+
     has_team_field, target_audience_id = _audience_id_for_team(
         connection, team_id, settings
     )
