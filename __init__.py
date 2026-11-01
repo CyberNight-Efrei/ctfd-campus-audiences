@@ -3,7 +3,7 @@ import logging
 import os
 
 from flask import abort, redirect, request, url_for
-from sqlalchemy import and_, delete, event, select
+from sqlalchemy import and_, delete, event, select, text
 
 from CTFd.models import (
     Challenges,
@@ -22,6 +22,8 @@ from CTFd.utils.user import get_current_user, is_admin
 
 PLUGIN_NAME = "ctfd_campus_audiences"
 CONFLICT_MODULE_NAME = "__conflicting_tag_mapping__"
+SYNC_LOCK_NAME = "ctfd_campus_audiences_sync"
+SYNC_LOCK_TIMEOUT_SECONDS = 300
 LOGGER = logging.getLogger("ctfd-campus-audiences")
 _MODEL_EVENTS_REGISTERED = False
 
@@ -310,27 +312,10 @@ def _sync_configuration(connection, settings):
     access_table = ModuleAccessModel.__table__
     managed_table = CampusManagedModuleAccess.__table__
 
-    # Remove only access links previously created by this plugin.
-    old_links = connection.execute(
-        select(
-            managed_table.c.module_id,
-            managed_table.c.audience_id,
-            managed_table.c.created_by_plugin,
-        )
-    ).all()
-    for old_link in old_links:
-        if old_link[2]:
-            connection.execute(
-                delete(access_table).where(
-                    and_(
-                        access_table.c.module_id == old_link[0],
-                        access_table.c.audience_id == old_link[1],
-                    )
-                )
-            )
-    connection.execute(delete(managed_table))
-
-    # Rebuild desired links. Existing links not created by the plugin are kept.
+    # Build the desired set first. Keep unchanged managed relations in place:
+    # deleting and recreating every link on every worker startup causes races
+    # with other Gunicorn workers and needlessly churns native CTFd access rows.
+    desired_links = set()
     for module_name in sorted(module_names):
         if module_name == CONFLICT_MODULE_NAME:
             continue
@@ -344,30 +329,89 @@ def _sync_configuration(connection, settings):
             audience_id = _ensure_named_row(
                 connection, AudienceModel, audience_name
             )
-            existing = connection.execute(
-                select(access_table.c.id).where(
+            desired_links.add((module_id, audience_id))
+
+    old_links = connection.execute(
+        select(
+            managed_table.c.module_id,
+            managed_table.c.audience_id,
+            managed_table.c.created_by_plugin,
+        )
+    ).all()
+
+    managed_pairs = set()
+    for old_link in old_links:
+        pair = (old_link[0], old_link[1])
+        if pair in desired_links:
+            # This relation is still configured; do not delete/reinsert it.
+            managed_pairs.add(pair)
+            if old_link[2]:
+                # Repair a plugin-managed relation if it was removed externally.
+                existing = connection.execute(
+                    select(access_table.c.id).where(
+                        and_(
+                            access_table.c.module_id == pair[0],
+                            access_table.c.audience_id == pair[1],
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    connection.execute(
+                        access_table.insert().values(
+                            module_id=pair[0],
+                            audience_id=pair[1],
+                        )
+                    )
+            continue
+
+        # Remove only a stale relation that this plugin originally created.
+        if old_link[2]:
+            connection.execute(
+                delete(access_table).where(
                     and_(
-                        access_table.c.module_id == module_id,
-                        access_table.c.audience_id == audience_id,
+                        access_table.c.module_id == pair[0],
+                        access_table.c.audience_id == pair[1],
                     )
                 )
-            ).first()
+            )
 
-            created_by_plugin = existing is None
-            if created_by_plugin:
-                values = {
-                    "module_id": module_id,
-                    "audience_id": audience_id,
-                }
-                connection.execute(access_table.insert().values(**values))
-
-            connection.execute(
-                managed_table.insert().values(
-                    module_id=module_id,
-                    audience_id=audience_id,
-                    created_by_plugin=created_by_plugin,
+        # Drop our tracking row even when the actual relation was manual.
+        connection.execute(
+            delete(managed_table).where(
+                and_(
+                    managed_table.c.module_id == pair[0],
+                    managed_table.c.audience_id == pair[1],
                 )
             )
+        )
+
+    # Add only relations that are not already tracked by this plugin.
+    for module_id, audience_id in sorted(desired_links - managed_pairs):
+        existing = connection.execute(
+            select(access_table.c.id).where(
+                and_(
+                    access_table.c.module_id == module_id,
+                    access_table.c.audience_id == audience_id,
+                )
+            )
+        ).first()
+
+        created_by_plugin = existing is None
+        if created_by_plugin:
+            connection.execute(
+                access_table.insert().values(
+                    module_id=module_id,
+                    audience_id=audience_id,
+                )
+            )
+
+        connection.execute(
+            managed_table.insert().values(
+                module_id=module_id,
+                audience_id=audience_id,
+                created_by_plugin=created_by_plugin,
+            )
+        )
 
 
 def _delete_membership(connection, model, account_field, account_id, audience_id):
@@ -671,34 +715,88 @@ def _clear_ctfd_caches():
     clear_accessible_module_ids()
 
 
+def _sync_database_state(connection, settings):
+    _sync_configuration(connection, settings)
+
+    user_ids = [
+        row[0] for row in connection.execute(select(Users.__table__.c.id))
+    ]
+    if get_config("user_mode", default="teams") == "teams":
+        team_ids = [
+            row[0]
+            for row in connection.execute(
+                select(Users.__table__.c.team_id)
+                .where(Users.__table__.c.team_id.isnot(None))
+                .distinct()
+            )
+        ]
+        for team_id in team_ids:
+            _sync_team_connection(connection, team_id, settings)
+    else:
+        for user_id in user_ids:
+            _sync_user_connection(connection, user_id, settings)
+
+    challenge_ids = [
+        row[0] for row in connection.execute(select(Challenges.__table__.c.id))
+    ]
+    for challenge_id in challenge_ids:
+        _sync_challenge_connection(connection, challenge_id, settings)
+
+    return user_ids, challenge_ids
+
+
 def _sync_everything():
     settings = _load_settings()
-    with db.engine.begin() as connection:
-        _sync_configuration(connection, settings)
 
-        user_ids = [
-            row[0] for row in connection.execute(select(Users.__table__.c.id))
-        ]
-        if get_config("user_mode", default="teams") == "teams":
-            team_ids = [
-                row[0]
-                for row in connection.execute(
-                    select(Users.__table__.c.team_id)
-                    .where(Users.__table__.c.team_id.isnot(None))
-                    .distinct()
-                )
-            ]
-            for team_id in team_ids:
-                _sync_team_connection(connection, team_id, settings)
-        else:
-            for user_id in user_ids:
-                _sync_user_connection(connection, user_id, settings)
+    if db.engine.dialect.name in ("mysql", "mariadb"):
+        # Hold the advisory lock and run the transaction on the SAME
+        # connection. This also works when SQLAlchemy's pool has size 1.
+        with db.engine.connect() as connection:
+            acquired = None
+            try:
+                with connection.begin():
+                    acquired = connection.execute(
+                        text("SELECT GET_LOCK(:lock_name, :timeout)"),
+                        {
+                            "lock_name": SYNC_LOCK_NAME,
+                            "timeout": SYNC_LOCK_TIMEOUT_SECONDS,
+                        },
+                    ).scalar()
 
-        challenge_ids = [
-            row[0] for row in connection.execute(select(Challenges.__table__.c.id))
-        ]
-        for challenge_id in challenge_ids:
-            _sync_challenge_connection(connection, challenge_id, settings)
+                    if acquired != 1:
+                        raise RuntimeError(
+                            "Could not acquire the CTFd Campus Audiences "
+                            "synchronization lock within {} seconds".format(
+                                SYNC_LOCK_TIMEOUT_SECONDS
+                            )
+                        )
+
+                    user_ids, challenge_ids = _sync_database_state(
+                        connection, settings
+                    )
+            finally:
+                if acquired == 1:
+                    try:
+                        released = connection.execute(
+                            text("SELECT RELEASE_LOCK(:lock_name)"),
+                            {"lock_name": SYNC_LOCK_NAME},
+                        ).scalar()
+                        connection.commit()
+                        if released != 1:
+                            LOGGER.warning(
+                                "MySQL did not confirm release of synchronization "
+                                "lock %s",
+                                SYNC_LOCK_NAME,
+                            )
+                    except Exception:
+                        # Closing the connection also releases a MySQL named lock.
+                        LOGGER.exception(
+                            "Failed to explicitly release synchronization lock %s",
+                            SYNC_LOCK_NAME,
+                        )
+    else:
+        with db.engine.begin() as connection:
+            user_ids, challenge_ids = _sync_database_state(connection, settings)
 
     _clear_ctfd_caches()
     LOGGER.info(
