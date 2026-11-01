@@ -5,16 +5,24 @@ from pathlib import Path
 
 source = Path("__init__.py").read_text(encoding="utf-8")
 tree = ast.parse(source)
-normalise_node = next(
+helper_names = {
+    "_clean_custom_field_value",
+    "_normalise",
+    "_unanimous_custom_field_value",
+}
+helper_nodes = [
     node
     for node in tree.body
-    if isinstance(node, ast.FunctionDef) and node.name == "_normalise"
-)
-isolated_module = ast.Module(body=[normalise_node], type_ignores=[])
+    if isinstance(node, ast.FunctionDef) and node.name in helper_names
+]
+assert {node.name for node in helper_nodes} == helper_names
+isolated_module = ast.Module(body=helper_nodes, type_ignores=[])
 namespace = {"json": json}
 exec(compile(isolated_module, "__init__.py", "exec"), namespace)
-normalise = namespace["_normalise"]
 
+clean = namespace["_clean_custom_field_value"]
+normalise = namespace["_normalise"]
+unanimous = namespace["_unanimous_custom_field_value"]
 
 assert normalise("Paris") == "paris"
 assert normalise('"Paris"') == "paris"
@@ -25,4 +33,17 @@ assert normalise(" Bordeaux ") == "bordeaux"
 assert normalise("") is None
 assert normalise(None) is None
 
-print("Custom Field normalization checks passed")
+# The Team Custom Field is filled only when every member has the same value.
+assert unanimous(["Paris", "Paris"], 2) == "Paris"
+assert unanimous(['"Paris"', "paris"], 2) == "Paris"
+assert unanimous([" Bordeaux ", "Bordeaux"], 2) == "Bordeaux"
+
+# Different campuses, missing values, and empty teams must leave it blank.
+assert unanimous(["Paris", "Bordeaux"], 2) is None
+assert unanimous(["Paris", None], 2) is None
+assert unanimous(["Paris", ""], 2) is None
+assert unanimous(["Paris"], 2) is None
+assert unanimous([], 0) is None
+assert clean('"Paris"') == "Paris"
+
+print("Custom Field normalization and team consensus checks passed")
