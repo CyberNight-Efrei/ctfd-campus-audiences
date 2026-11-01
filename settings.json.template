@@ -1,5 +1,6 @@
 {
   "user_field": "Campus",
+  "team_field": "Campus",
   "campus_to_audience": {
     "paris": "Paris",
     "bordeaux": "Bordeaux"
