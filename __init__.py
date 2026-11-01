@@ -225,7 +225,25 @@ def _load_settings():
 def _normalise(value):
     if not isinstance(value, str):
         return None
-    value = value.strip().casefold()
+
+    value = value.strip()
+
+    # Some CTFd Custom Field entries are persisted as JSON string literals,
+    # so a text value such as Paris can arrive from SQL as '"Paris"'.
+    # Decode that representation before applying the mapping lookup.
+    if len(value) >= 2 and value[0] == value[-1]:
+        if value[0] == '"':
+            try:
+                decoded = json.loads(value)
+                if isinstance(decoded, str):
+                    value = decoded.strip()
+            except (TypeError, ValueError):
+                # Be tolerant of legacy rows containing unmatched JSON escapes.
+                value = value[1:-1].strip()
+        elif value[0] == "'":
+            value = value[1:-1].strip()
+
+    value = value.casefold()
     return value or None
 
 
