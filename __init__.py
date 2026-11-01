@@ -121,7 +121,8 @@ except ImportError:
 
 
 HAS_NATIVE_CHALLENGE_MODULE_FIELD = (
-    hasattr(Challenges, "module_id")
+    HAS_NATIVE_AUDIENCES_AND_MODULES
+    and hasattr(Challenges, "module_id")
     and "module_id" in Challenges.__table__.columns
 )
 
