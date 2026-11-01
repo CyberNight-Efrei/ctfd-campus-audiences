@@ -187,8 +187,9 @@ def _sync_configuration(connection, settings):
     module_to_audiences = _module_audience_mapping(settings)
 
     module_names = set(tag_to_module.values())
+    configured_module_audiences = settings.get("module_to_audiences") or {}
     module_names.update(
-        name for name in settings.get("module_to_audiences", {})
+        name for name in configured_module_audiences
         if isinstance(name, str) and name.strip()
     )
     module_names.add(CONFLICT_MODULE_NAME)
