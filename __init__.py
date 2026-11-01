@@ -21,6 +21,7 @@ from CTFd.utils.user import get_current_user, is_admin
 PLUGIN_NAME = "ctfd_campus_audiences"
 CONFLICT_MODULE_NAME = "__conflicting_tag_mapping__"
 LOGGER = logging.getLogger("ctfd-campus-audiences")
+_MODEL_EVENTS_REGISTERED = False
 
 # CTFd 3.8.9 does not ship native Audience/Module models. These plugin-owned
 # tables provide the same concepts without patching CTFd's core schema.
@@ -348,10 +349,16 @@ def _tag_changed(mapper, connection, target):
 
 
 def _register_model_events():
+    global _MODEL_EVENTS_REGISTERED
+    if _MODEL_EVENTS_REGISTERED:
+        return
+
     # Mapper hooks run in the same transaction as CTFd's user/tag update.
     for action in ("after_insert", "after_update", "after_delete"):
         event.listen(UserFieldEntries, action, _user_field_changed)
         event.listen(Tags, action, _tag_changed)
+
+    _MODEL_EVENTS_REGISTERED = True
 
 
 def _current_user_id():
