@@ -46,10 +46,11 @@
         En mode Teams, le plugin renseigne automatiquement le Custom Field
         équipe <code>team_field</code> (par défaut le même nom que
         <code>user_field</code>) à partir des Custom Fields des membres.
-        Le champ est rempli uniquement si tous les membres ont une valeur
-        non vide et identique. Si les valeurs divergent ou si un membre n'a
-        pas de valeur, le champ de l'équipe est vidé et aucune audience de
-        campus ne lui est attribuée. Le champ équipe est donc calculé depuis
+        Le champ est rempli si au moins un membre a une valeur non vide et si
+        toutes les valeurs renseignées sont identiques. Les membres sans
+        Campus sont ignorés. Si deux valeurs renseignées divergent, ou si
+        aucun membre n'a de valeur, le champ de l'équipe est vidé et aucune
+        audience de campus ne lui est attribuée. Le champ équipe est donc calculé depuis
         les champs utilisateurs : il ne doit pas être renseigné manuellement.
         Si aucun Custom Field équipe correspondant n'existe, le plugin utilise
         le comportement de compatibilité et calcule directement l'audience
