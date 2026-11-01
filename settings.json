@@ -1,15 +1,15 @@
 {
   "user_field": "campus",
   "campus_to_audience": {
-    "paris": "Paris",
-    "bordeaux": "Bordeaux"
+    "paris": "Paris 🥐",
+    "bordeaux": "Bordeaux 🍷"
   },
   "tag_to_module": {
-    "paris": "Paris",
-    "bordeaux": "Bordeaux"
+    "paris": "Paris 🥐",
+    "bordeaux": "Bordeaux 🍷"
   },
   "module_to_audiences": {
-    "Paris": ["Paris"],
-    "Bordeaux": ["Bordeaux"]
+    "Paris 🥐": ["Paris 🥐"],
+    "Bordeaux 🍷": ["Bordeaux 🍷"]
   }
 }
