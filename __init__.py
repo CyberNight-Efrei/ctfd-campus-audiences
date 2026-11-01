@@ -450,7 +450,9 @@ def _enforce_challenge_access():
             if not _can_access_challenge(int(first), user_id):
                 abort(404)
         elif first == "attempt" and request.method == "POST":
-            body = request.get_json(silent=True) or request.form
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict):
+                body = request.form
             challenge_id = body.get("challenge_id")
             if challenge_id:
                 try:
@@ -479,7 +481,9 @@ def _enforce_challenge_access():
     # Prevent unlocking paid hints/solutions attached to an inaccessible challenge.
     unlock_tail = _api_v1_path_parts("unlocks")
     if unlock_tail == [] and request.method == "POST":
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            body = {}
         target_type = body.get("type")
         target_id = body.get("target")
         target_model = {"hints": Hints, "solutions": Solutions}.get(target_type)
