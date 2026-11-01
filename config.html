@@ -1,0 +1,51 @@
+<div class="container mt-4">
+  <div class="row">
+    <div class="col-md-10 offset-md-1">
+      <h2>Campus Audiences</h2>
+      <p>
+        Ce plugin synchronise les audiences des joueurs depuis un Custom Field
+        et range les challenges dans des modules en fonction de leurs tags.
+      </p>
+
+      <h4>Synchronisation</h4>
+      <p>
+        Une synchronisation complète est effectuée au démarrage de CTFd.
+        Les changements de Custom Fields et de tags sont ensuite traités
+        automatiquement.
+      </p>
+      <form method="POST" action="{{ url_for('ctfd_campus_audiences.sync') }}">
+        <input type="hidden" name="nonce" value="{{ session.get('nonce', '') }}">
+        <button class="btn btn-primary" type="submit">
+          Synchroniser les utilisateurs et challenges existants
+        </button>
+      </form>
+
+      <hr>
+      <h4>Configuration</h4>
+      <p>
+        Modifie le fichier <code>settings.json</code> dans le répertoire du
+        plugin, puis utilise le bouton ci-dessus pour réappliquer la
+        configuration.
+      </p>
+      <ul>
+        <li><code>user_field</code> : nom du Custom Field utilisateur.</li>
+        <li><code>campus_to_audience</code> : valeur du champ vers nom d'audience.</li>
+        <li><code>tag_to_module</code> : tag vers nom du module.</li>
+        <li><code>module_to_audiences</code> : audiences autorisées pour chaque module.</li>
+      </ul>
+
+      <div class="alert alert-info">
+        Les challenges sans tag configuré restent publics. Si plusieurs tags
+        d'un challenge correspondent à des modules différents, le challenge
+        est placé dans un module de conflit inaccessible aux joueurs.
+        Les administrateurs conservent l'accès à tous les challenges.
+      </div>
+
+      <p>
+        <strong>CTFd 3.8.9 :</strong> les audiences et modules sont stockés dans
+        des tables propres au plugin ; cette version de CTFd ne fournit pas
+        encore ces modèles nativement.
+      </p>
+    </div>
+  </div>
+</div>
