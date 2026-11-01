@@ -21,7 +21,7 @@ jobs:
       - name: Compile plugin
         run: python -m py_compile __init__.py
       - name: Validate default configuration
-        run: python -m json.tool settings.json > /dev/null
+        run: python -m json.tool settings.json.template > /dev/null
       - name: Test Custom Field value normalization
         run: python tests/test_normalise.py
       - name: Check compatibility branches are present
