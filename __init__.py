@@ -850,12 +850,14 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
         else None
     )
 
-    manual_entries = [
-        row
-        for row in team_entries
-        if row[0] != managed_entry_id
-        and _clean_custom_field_value(row[1]) is not None
-    ]
+    manual_entries = []
+    if _has_untracked_team_field_value(team_entries, managed_entry_id):
+        manual_entries = [
+            row
+            for row in team_entries
+            if row[0] != managed_entry_id
+            and _clean_custom_field_value(row[1]) is not None
+        ]
 
     if manual_entries:
         if managed_entry_id is not None:
