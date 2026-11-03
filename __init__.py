@@ -12,6 +12,7 @@ from CTFd.models import (
     Hints,
     Solutions,
     Tags,
+    TeamFieldEntries,
     UserFieldEntries,
     Users,
     db,
@@ -917,9 +918,7 @@ def _sync_team_connection(connection, team_id, settings):
     # A non-empty Team Custom Field is authoritative, whether it was entered
     # manually or derived by this plugin. Derive it from users only while it
     # has no manual value.
-    has_team_field, _ = _sync_team_custom_field_from_users(
-        connection, team_id, settings
-    )
+    _sync_team_custom_field_from_users(connection, team_id, settings)
 
     has_team_field, target_audience_id = _audience_id_for_team(
         connection, team_id, settings
@@ -1218,8 +1217,9 @@ def _user_field_changed(mapper, connection, target):
     settings = _load_settings()
     changed = False
 
-    if target.user_id is not None:
-        _sync_user_connection(connection, target.user_id, settings)
+    user_id = getattr(target, "user_id", None)
+    if user_id is not None:
+        _sync_user_connection(connection, user_id, settings)
         changed = True
 
     # An ORM edit to the configured Team Custom Field is a manual override.
@@ -1250,6 +1250,7 @@ def _register_model_events():
     # Mapper hooks run in the same transaction as CTFd's user/tag update.
     for action in ("after_insert", "after_update", "after_delete"):
         event.listen(UserFieldEntries, action, _user_field_changed)
+        event.listen(TeamFieldEntries, action, _user_field_changed)
         event.listen(Tags, action, _tag_changed)
         event.listen(Users, action, _user_team_changed)
 
