@@ -286,6 +286,22 @@ def _unanimous_custom_field_value(values, member_count):
     return cleaned_values[0]
 
 
+def _team_field_value_was_manually_changed(current_value, generated_value):
+    current_value = _clean_custom_field_value(current_value)
+    return (
+        current_value is not None
+        and _normalise(current_value) != _normalise(generated_value)
+    )
+
+
+def _has_untracked_team_field_value(entries, managed_entry_id):
+    return any(
+        entry_id != managed_entry_id
+        and _clean_custom_field_value(value) is not None
+        for entry_id, value in entries
+    )
+
+
 def _normalised_mapping(mapping):
     result = {}
     for key, value in mapping.items():
@@ -783,9 +799,8 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
             # If an administrator edited a plugin-generated entry to a
             # different non-empty value, detach it from plugin ownership.
             # It is now a manual value and must remain authoritative.
-            if (
-                current_value is not None
-                and _normalise(current_value) != _normalise(generated_value)
+            if _team_field_value_was_manually_changed(
+                current_value, generated_value
             ):
                 connection.execute(
                     delete(managed_table).where(
@@ -806,14 +821,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
             managed = None
 
     managed_entry_id = managed[0] if managed is not None else None
-    manual_entries = [
-        row
-        for row in team_entries
-        if row[0] != managed_entry_id
-        and _clean_custom_field_value(row[1]) is not None
-    ]
-
-    if manual_entries:
+    if _has_untracked_team_field_value(team_entries, managed_entry_id):
         # A separate non-empty, untracked entry is an explicit manual value.
         # Remove our own derived entry (if any), but preserve the manual row.
         if managed_entry_id is not None:
@@ -1176,6 +1184,36 @@ def _sync_everything():
     return len(user_ids), len(challenge_ids)
 
 
+def _release_team_field_ownership(connection, target, settings):
+    """Treat ORM edits to the Team Custom Field as intentional manual input."""
+    if getattr(target, "type", None) != "team":
+        return
+
+    team_id = getattr(target, "team_id", None)
+    field_id = getattr(target, "field_id", None)
+    if team_id is None or field_id is None:
+        return
+
+    team_field_name = settings.get(
+        "team_field", settings.get("user_field", "campus")
+    )
+    field_name = connection.execute(
+        select(Fields.__table__.c.name).where(
+            Fields.__table__.c.id == field_id,
+            Fields.__table__.c.type == "team",
+        )
+    ).first()
+    if field_name is None or field_name[0] != team_field_name:
+        return
+
+    connection.execute(
+        delete(CampusManagedTeamFieldEntry.__table__).where(
+            CampusManagedTeamFieldEntry.__table__.c.team_id == team_id,
+            CampusManagedTeamFieldEntry.__table__.c.field_id == field_id,
+        )
+    )
+
+
 def _user_field_changed(mapper, connection, target):
     settings = _load_settings()
     changed = False
@@ -1184,11 +1222,11 @@ def _user_field_changed(mapper, connection, target):
         _sync_user_connection(connection, target.user_id, settings)
         changed = True
 
-    # CTFd stores Team Custom Field entries in field_entries with type='team'
-    # and team_id set (user_id is NULL). Reconcile that team on insert/update/
-    # delete so changing the team's Campus value takes effect immediately.
+    # An ORM edit to the configured Team Custom Field is a manual override.
+    # Core writes performed by this plugin do not fire mapper events.
     team_id = getattr(target, "team_id", None)
     if team_id is not None and get_config("user_mode", default="teams") == "teams":
+        _release_team_field_ownership(connection, target, settings)
         _sync_team_connection(connection, team_id, settings)
         changed = True
 
