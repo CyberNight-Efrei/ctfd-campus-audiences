@@ -43,18 +43,24 @@
       </ul>
 
       <div class="alert alert-info">
-        En mode Teams, le plugin renseigne automatiquement le Custom Field
-        équipe <code>team_field</code> (par défaut le même nom que
-        <code>user_field</code>) à partir des Custom Fields des membres.
-        Le champ est rempli si au moins un membre a une valeur non vide et si
-        toutes les valeurs renseignées sont identiques. Les membres sans
-        Campus sont ignorés. Si deux valeurs renseignées divergent, ou si
-        aucun membre n'a de valeur, le champ de l'équipe est vidé et aucune
-        audience de campus ne lui est attribuée. Le champ équipe est donc calculé depuis
-        les champs utilisateurs : il ne doit pas être renseigné manuellement.
-        Si aucun Custom Field équipe correspondant n'existe, le plugin utilise
-        le comportement de compatibilité et calcule directement l'audience
-        depuis les valeurs unanimes des membres.
+        En mode Teams, le Custom Field équipe <code>team_field</code>
+        (par défaut le même nom que <code>user_field</code>) est la source
+        de vérité pour l'audience. Tu peux le remplir manuellement : sa valeur
+        est utilisée même si aucun membre n'a de Campus.
+        <br>
+        Si le champ équipe est vide, le plugin tente de le calculer depuis les
+        Custom Fields des membres. Il le remplit si au moins un membre possède
+        un Campus et si toutes les valeurs renseignées sont identiques. Les
+        membres sans Campus sont ignorés. En cas de conflit entre deux valeurs
+        renseignées, ou si aucun membre n'a de Campus, le champ reste vide.
+        Les valeurs générées par le plugin sont suivies séparément : elles
+        peuvent être mises à jour ou supprimées, tandis qu'une valeur saisie
+        manuellement est conservée et ne sera jamais écrasée par le calcul
+        automatique.
+        <br>
+        Si aucun Custom Field équipe correspondant n'existe, le plugin calcule
+        directement l'audience à partir des valeurs non vides et concordantes
+        des membres.
       </div>
 
       <div class="alert alert-warning">
