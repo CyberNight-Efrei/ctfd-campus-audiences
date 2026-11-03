@@ -24,8 +24,8 @@ The detection is feature-based, so a checkout reporting \`3.8.0\` can still use 
 - Assign challenges to modules from their tags.
 - Configure which audiences can access each module.
 - Synchronize existing users and challenges at startup or from the admin plugin page.
-- Automatically resync when a user Custom Field entry or a challenge tag is inserted, updated, or deleted.
-- In CTFd Teams mode, automatically populate the Team Custom Field from the members' User Custom Fields when every member has the same non-empty value. A conflict or missing value leaves the Team Custom Field empty and gives the team no campus audience.
+- Automatically resync when a user or team Custom Field entry, team membership, or challenge tag changes.
+- In CTFd Teams mode, use a non-empty Team Custom Field as the audience source of truth; fill it automatically from the members' non-empty User Custom Fields only when they all agree.
 - Enforce module access on challenge lists, challenge details, nested challenge APIs, standalone hint/solution APIs, hint/solution unlocks, attempts, challenge files, and solution-file downloads.
 - Keep challenges without a plugin-managed tag assignment public in the legacy compatibility mode.
 - Deny regular users access to a challenge with tags mapped to multiple modules (fail closed).
@@ -82,14 +82,18 @@ Rules:
 
 ## Teams mode behavior
 
-CTFd's Teams mode shares solves and challenge access across the team. When a matching Team Custom Field exists (`team_field`, defaulting to `user_field`), the plugin now maintains that field automatically from the members' User Custom Fields. It fills the Team Custom Field only if every current team member has a non-empty value and all normalized values agree. For example, if every member has `Paris`, the team field becomes `Paris`; if one member has `Bordeaux` while another has `Paris`, the team field is cleared. Members with no campus do not create a conflict. A conflict never leaves a stale or manually-entered value in place. The resulting Team Custom Field determines the team's audience. If no matching Team Custom Field exists (or `team_field` is explicitly set to `null`), the compatibility fallback computes the audience from unanimous member values without writing a Team Custom Field.
+CTFd's Teams mode shares solves and challenge access across the team. When a matching Team Custom Field exists (`team_field`, defaulting to `user_field`), its non-empty value is the source of truth for the team's audience, even when none of the members has a User Custom Field value. Administrators can fill this Team Custom Field manually. When the Team Custom Field is empty, the plugin derives it from the members' User Custom Fields: at least one member must have a non-empty campus, and all non-empty normalized values must agree. Members with empty values are ignored. If two non-empty values conflict, or all members have an empty value, the Team Custom Field stays empty. Automatically generated values are tracked so the plugin can update or clear only its own values when member data changes; manually entered values are preserved and are never replaced by automatic derivation. If no matching Team Custom Field exists (or `team_field` is explicitly set to `null`), the compatibility fallback computes the audience directly from the unanimous non-empty member values without writing a Team Custom Field.
 
 In Users mode, each user is assigned independently.
 
+**Upgrade note:** older plugin versions did not track whether a Team Custom Field value was generated or entered manually. On the first synchronization after upgrading, a single existing value that exactly matches the current member-derived value is adopted as generated; other existing non-empty values are kept as manual overrides. A manual edit made through CTFd after this upgrade is explicitly recorded as manual, even when it matches the current member values.
+
 ## Synchronization and ownership
 
-- User Custom Field changes recalculate the affected team's Team Custom Field and audience immediately.
-- Team Custom Fields are derived automatically from member values: the plugin fills the field when at least one current member has a non-empty value and all non-empty values agree (case-insensitive, with surrounding quotes/whitespace normalized). Members with an empty value are ignored. If two non-empty values differ, or all members have no value, the plugin clears the Team Custom Field and removes the team's plugin-managed campus audience.
+- User Custom Field changes recalculate the affected team's Team Custom Field and audience immediately, unless the Team Custom Field contains an explicit manual value.
+- Team Custom Field insertions, edits, and deletions are synchronized immediately; non-empty values entered through CTFd are recorded as manual overrides.
+- A non-empty manual Team Custom Field is authoritative for the team audience. When it is empty, the plugin fills it only if at least one member has a non-empty User Custom Field value and all non-empty values agree; empty member values are ignored.
+- If non-empty member values conflict, or all members have an empty value, the plugin clears only its own previously generated Team Custom Field value and removes the team's plugin-managed campus audience. Manually entered values are preserved.
 - User team changes recalculate the Team Custom Field from the new membership of both the old and new teams.
 - Challenge tag changes update the plugin-managed module assignment immediately.
 - Startup/manual synchronization also processes records that existed before the plugin was installed.

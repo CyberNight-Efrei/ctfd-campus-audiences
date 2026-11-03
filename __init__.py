@@ -12,6 +12,7 @@ from CTFd.models import (
     Hints,
     Solutions,
     Tags,
+    TeamFieldEntries,
     UserFieldEntries,
     Users,
     db,
@@ -162,6 +163,23 @@ class CampusManagedTeamAudienceMember(db.Model):
     )
 
 
+class CampusManagedTeamFieldEntry(db.Model):
+    __tablename__ = "campus_managed_team_field_entries"
+
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, nullable=False)
+    field_id = db.Column(db.Integer, nullable=False)
+    entry_id = db.Column(db.Integer, nullable=True, unique=True)
+    generated_value = db.Column(db.Text, nullable=True)
+    is_manual = db.Column(db.Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "team_id", "field_id", name="uq_campus_managed_team_field"
+        ),
+    )
+
+
 class CampusManagedModuleAccess(db.Model):
     __tablename__ = "campus_managed_module_access"
 
@@ -268,6 +286,22 @@ def _unanimous_custom_field_value(values, member_count):
         return None
 
     return cleaned_values[0]
+
+
+def _team_field_value_was_manually_changed(current_value, generated_value):
+    current_value = _clean_custom_field_value(current_value)
+    return (
+        current_value is not None
+        and _normalise(current_value) != _normalise(generated_value)
+    )
+
+
+def _has_untracked_team_field_value(entries, managed_entry_id):
+    return any(
+        entry_id != managed_entry_id
+        and _clean_custom_field_value(value) is not None
+        for entry_id, value in entries
+    )
 
 
 def _normalised_mapping(mapping):
@@ -655,24 +689,69 @@ def _sync_team_membership(connection, team_id, audience_id):
     )
 
 
-def _sync_team_custom_field_from_users(connection, team_id, settings):
-    """Set the Team Custom Field from unanimous User Custom Field values.
+def _team_custom_field_value_from_users(connection, team_id, user_field_name):
+    """Return a team-wide campus when all non-empty member values agree."""
+    if not isinstance(user_field_name, str) or not user_field_name.strip():
+        return None
 
-    Returns True when the configured Team Custom Field exists. In that case,
-    the field is fully managed from its members: conflicts or missing values
-    remove its entry so stale/manual values cannot override the conflict.
+    fields = Fields.__table__
+    entries = UserFieldEntries.__table__
+    user_field = connection.execute(
+        select(fields.c.id).where(
+            fields.c.type == "user",
+            fields.c.name == user_field_name,
+        )
+    ).first()
+    if user_field is None:
+        return None
+
+    member_ids = [
+        row[0]
+        for row in connection.execute(
+            select(Users.__table__.c.id)
+            .where(Users.__table__.c.team_id == team_id)
+            .order_by(Users.__table__.c.id)
+        ).all()
+    ]
+    if not member_ids:
+        return None
+
+    rows = connection.execute(
+        select(entries.c.user_id, entries.c.value)
+        .where(
+            entries.c.field_id == user_field[0],
+            entries.c.type == "user",
+            entries.c.user_id.in_(member_ids),
+        )
+        .order_by(entries.c.id.desc())
+    ).all()
+
+    values_by_user = {}
+    # Match _audience_id_for_user: the newest row wins if legacy data contains
+    # multiple entries for the same user and field.
+    for user_id, value in rows:
+        values_by_user.setdefault(user_id, value)
+
+    member_values = [values_by_user.get(user_id) for user_id in member_ids]
+    return _unanimous_custom_field_value(member_values, len(member_ids))
+
+
+def _sync_team_custom_field_from_users(connection, team_id, settings):
+    """Derive a Team Custom Field only when no manual value is present.
+
+    Plugin-generated values are tracked so they can be refreshed or removed.
+    Manual values are tracked separately and always remain authoritative.
     """
     user_field_name = settings.get("user_field", "campus")
     team_field_name = settings.get(
         "team_field", settings.get("user_field", "campus")
     )
-    if not isinstance(user_field_name, str) or not user_field_name.strip():
-        return False
     if not isinstance(team_field_name, str) or not team_field_name.strip():
         return False
 
     fields = Fields.__table__
     entries = UserFieldEntries.__table__
+    managed_table = CampusManagedTeamFieldEntry.__table__
 
     team_field = connection.execute(
         select(fields.c.id).where(
@@ -683,94 +762,222 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
     if team_field is None:
         return False
 
-    user_field = connection.execute(
-        select(fields.c.id).where(
-            fields.c.type == "user",
-            fields.c.name == user_field_name,
-        )
-    ).first()
-
-    member_ids = [
-        row[0]
-        for row in connection.execute(
-            select(Users.__table__.c.id)
-            .where(Users.__table__.c.team_id == team_id)
-            .order_by(Users.__table__.c.id)
-        ).all()
-    ]
-
-    values_by_user = {}
-    if user_field is not None and member_ids:
-        rows = connection.execute(
-            select(entries.c.user_id, entries.c.value)
-            .where(
-                entries.c.field_id == user_field[0],
-                entries.c.type == "user",
-                entries.c.user_id.in_(member_ids),
-            )
-            .order_by(entries.c.id.desc())
-        ).all()
-
-        # Match _audience_id_for_user: the most recently inserted entry wins
-        # if legacy data contains more than one row for the same user/field.
-        for user_id, value in rows:
-            values_by_user.setdefault(user_id, value)
-
-    member_values = [values_by_user.get(user_id) for user_id in member_ids]
-    team_value = _unanimous_custom_field_value(
-        member_values, len(member_ids)
-    )
-
+    field_id = team_field[0]
     conditions = [
-        entries.c.field_id == team_field[0],
+        entries.c.field_id == field_id,
         entries.c.team_id == team_id,
         entries.c.type == "team",
     ]
     if "user_id" in entries.c:
         conditions.append(entries.c.user_id.is_(None))
 
-    existing_rows = connection.execute(
-        select(entries.c.id)
+    team_entries = connection.execute(
+        select(entries.c.id, entries.c.value)
         .where(and_(*conditions))
         .order_by(entries.c.id.desc())
     ).all()
 
-    if team_value is None:
-        # No consensus: leave the Team Custom Field genuinely empty.
-        connection.execute(delete(entries).where(and_(*conditions)))
+    managed = connection.execute(
+        select(
+            managed_table.c.entry_id,
+            managed_table.c.generated_value,
+            managed_table.c.is_manual,
+        ).where(
+            managed_table.c.team_id == team_id,
+            managed_table.c.field_id == field_id,
+        )
+    ).first()
+
+    managed_entry = None
+    if managed is not None:
+        managed_entry = next(
+            (row for row in team_entries if row[0] == managed[0]), None
+        )
+
+        if managed[2]:
+            # A manually-managed value is authoritative while it remains
+            # non-empty. Clearing or deleting it permits automatic derivation.
+            if (
+                managed_entry is not None
+                and _clean_custom_field_value(managed_entry[1]) is not None
+            ):
+                return True
+
+            connection.execute(
+                delete(managed_table).where(
+                    managed_table.c.team_id == team_id,
+                    managed_table.c.field_id == field_id,
+                )
+            )
+            managed = None
+            managed_entry = None
+
+        elif managed_entry is not None:
+            current_value = _clean_custom_field_value(managed_entry[1])
+            generated_value = _clean_custom_field_value(managed[1])
+
+            # Also recognize manual edits performed outside CTFd's ORM events.
+            if _team_field_value_was_manually_changed(
+                current_value, generated_value
+            ):
+                connection.execute(
+                    managed_table.update()
+                    .where(
+                        managed_table.c.team_id == team_id,
+                        managed_table.c.field_id == field_id,
+                    )
+                    .values(
+                        entry_id=managed_entry[0],
+                        generated_value=None,
+                        is_manual=True,
+                    )
+                )
+                return True
+
+        else:
+            # The tracked entry was deleted outside the plugin.
+            connection.execute(
+                delete(managed_table).where(
+                    managed_table.c.team_id == team_id,
+                    managed_table.c.field_id == field_id,
+                )
+            )
+            managed = None
+
+    managed_entry_id = (
+        managed[0]
+        if managed is not None and not managed[2]
+        else None
+    )
+
+    manual_entries = []
+    if _has_untracked_team_field_value(team_entries, managed_entry_id):
+        manual_entries = [
+            row
+            for row in team_entries
+            if row[0] != managed_entry_id
+            and _clean_custom_field_value(row[1]) is not None
+        ]
+
+    if manual_entries:
+        if managed_entry_id is not None:
+            # A new manual value supersedes a previously-generated value.
+            connection.execute(
+                delete(entries).where(entries.c.id == managed_entry_id)
+            )
+            connection.execute(
+                delete(managed_table).where(
+                    managed_table.c.team_id == team_id,
+                    managed_table.c.field_id == field_id,
+                )
+            )
+        else:
+            # Before ownership tracking existed, the plugin may already have
+            # populated this field. Adopt a single existing value only when
+            # it exactly agrees with today's member-derived value. Otherwise
+            # preserve it as a manual override.
+            team_value = _team_custom_field_value_from_users(
+                connection, team_id, user_field_name
+            )
+            if (
+                managed is None
+                and len(manual_entries) == 1
+                and team_value is not None
+                and _normalise(manual_entries[0][1]) == _normalise(team_value)
+            ):
+                legacy_entry_id = manual_entries[0][0]
+                connection.execute(
+                    managed_table.insert().values(
+                        team_id=team_id,
+                        field_id=field_id,
+                        entry_id=legacy_entry_id,
+                        generated_value=team_value,
+                        is_manual=False,
+                    )
+                )
         return True
 
-    if existing_rows:
-        # Keep the newest row and remove any duplicate legacy rows.
-        keep_id = existing_rows[0][0]
+    team_value = _team_custom_field_value_from_users(
+        connection, team_id, user_field_name
+    )
+
+    if managed_entry_id is not None:
+        if team_value is None:
+            # A disagreement (or no member campus) clears only the value that
+            # the plugin itself generated. Manual values are never deleted.
+            connection.execute(
+                delete(entries).where(entries.c.id == managed_entry_id)
+            )
+            connection.execute(
+                delete(managed_table).where(
+                    managed_table.c.team_id == team_id,
+                    managed_table.c.field_id == field_id,
+                )
+            )
+        else:
+            connection.execute(
+                entries.update()
+                .where(entries.c.id == managed_entry_id)
+                .values(value=team_value)
+            )
+            connection.execute(
+                managed_table.update()
+                .where(
+                    managed_table.c.team_id == team_id,
+                    managed_table.c.field_id == field_id,
+                )
+                .values(generated_value=team_value, is_manual=False)
+            )
+        return True
+
+    if team_value is None:
+        # No non-empty values or a conflict: leave empty Team Field rows as-is.
+        return True
+
+    # Reuse an empty Team Field row if CTFd created one, otherwise insert one.
+    empty_entry = next(
+        (
+            row
+            for row in team_entries
+            if _clean_custom_field_value(row[1]) is None
+        ),
+        None,
+    )
+    if empty_entry is not None:
+        entry_id = empty_entry[0]
         connection.execute(
             entries.update()
-            .where(entries.c.id == keep_id)
+            .where(entries.c.id == entry_id)
             .values(value=team_value)
         )
-        duplicate_ids = [row[0] for row in existing_rows[1:]]
-        if duplicate_ids:
-            connection.execute(
-                delete(entries).where(entries.c.id.in_(duplicate_ids))
-            )
     else:
-        values = {
-            "field_id": team_field[0],
+        insert_values = {
+            "field_id": field_id,
             "team_id": team_id,
             "type": "team",
             "value": team_value,
         }
         if "user_id" in entries.c:
-            values["user_id"] = None
-        connection.execute(entries.insert().values(**values))
+            insert_values["user_id"] = None
+        result = connection.execute(entries.insert().values(**insert_values))
+        entry_id = result.inserted_primary_key[0]
 
+    connection.execute(
+        managed_table.insert().values(
+            team_id=team_id,
+            field_id=field_id,
+            entry_id=entry_id,
+            generated_value=team_value,
+            is_manual=False,
+        )
+    )
     return True
 
 
 def _sync_team_connection(connection, team_id, settings):
-    # When a matching Team Custom Field exists, derive its value from the
-    # members' User Custom Fields before using it for the audience assignment.
-    # A disagreement (or a missing member value) leaves the team field empty.
+    # A non-empty Team Custom Field is authoritative, whether it was entered
+    # manually or derived by this plugin. Derive it from users only while it
+    # has no manual value.
     _sync_team_custom_field_from_users(connection, team_id, settings)
 
     has_team_field, target_audience_id = _audience_id_for_team(
@@ -778,25 +985,20 @@ def _sync_team_connection(connection, team_id, settings):
     )
 
     if not has_team_field:
-        user_ids = [
-            row[0]
-            for row in connection.execute(
-                select(Users.__table__.c.id).where(
-                    Users.__table__.c.team_id == team_id
-                )
-            ).all()
-        ]
-
-        # Backward compatibility for installations without a Team Custom Field:
-        # require all current members to resolve to the same configured campus.
-        resolved_audiences = {
-            _audience_id_for_user(connection, user_id, settings)
-            for user_id in user_ids
-        }
-        if len(user_ids) == 0 or len(resolved_audiences) != 1:
-            target_audience_id = None
-        else:
-            target_audience_id = next(iter(resolved_audiences))
+        # Compatibility mode for installations without a Team Custom Field:
+        # derive directly from all non-empty member values, ignoring blanks.
+        team_value = _team_custom_field_value_from_users(
+            connection, team_id, settings.get("user_field", "campus")
+        )
+        campus_to_audience = _normalised_mapping(
+            settings.get("campus_to_audience", {})
+        )
+        audience_name = campus_to_audience.get(_normalise(team_value))
+        target_audience_id = (
+            _ensure_named_row(connection, AudienceModel, audience_name)
+            if audience_name
+            else None
+        )
 
     _sync_team_membership(connection, team_id, target_audience_id)
 
@@ -1041,24 +1243,119 @@ def _sync_everything():
     return len(user_ids), len(challenge_ids)
 
 
+def _team_field_event_context(connection, target, settings):
+    if getattr(target, "type", None) != "team":
+        return None
+
+    team_id = getattr(target, "team_id", None)
+    field_id = getattr(target, "field_id", None)
+    if team_id is None or field_id is None:
+        return None
+
+    team_field_name = settings.get(
+        "team_field", settings.get("user_field", "campus")
+    )
+    field_name = connection.execute(
+        select(Fields.__table__.c.name).where(
+            Fields.__table__.c.id == field_id,
+            Fields.__table__.c.type == "team",
+        )
+    ).first()
+    if field_name is None or field_name[0] != team_field_name:
+        return None
+
+    return team_id, field_id
+
+
+def _team_field_manually_changed(mapper, connection, target):
+    settings = _load_settings()
+    context = _team_field_event_context(connection, target, settings)
+    if context is None or get_config("user_mode", default="teams") != "teams":
+        return
+
+    team_id, field_id = context
+    managed_table = CampusManagedTeamFieldEntry.__table__
+    entries = UserFieldEntries.__table__
+    managed = connection.execute(
+        select(managed_table.c.entry_id, managed_table.c.is_manual).where(
+            managed_table.c.team_id == team_id,
+            managed_table.c.field_id == field_id,
+        )
+    ).first()
+
+    value = _clean_custom_field_value(getattr(target, "value", None))
+    if value is None:
+        # An explicitly emptied field is eligible for automatic derivation.
+        if managed is not None and managed[0] == target.id:
+            connection.execute(
+                delete(managed_table).where(
+                    managed_table.c.team_id == team_id,
+                    managed_table.c.field_id == field_id,
+                )
+            )
+    else:
+        if managed is not None and not managed[1] and managed[0] != target.id:
+            # Remove the previous auto-generated row when the administrator
+            # enters a separate manual Team Custom Field value.
+            connection.execute(
+                delete(entries).where(entries.c.id == managed[0])
+            )
+
+        if managed is None:
+            connection.execute(
+                managed_table.insert().values(
+                    team_id=team_id,
+                    field_id=field_id,
+                    entry_id=target.id,
+                    generated_value=None,
+                    is_manual=True,
+                )
+            )
+        else:
+            connection.execute(
+                managed_table.update()
+                .where(
+                    managed_table.c.team_id == team_id,
+                    managed_table.c.field_id == field_id,
+                )
+                .values(
+                    entry_id=target.id,
+                    generated_value=None,
+                    is_manual=True,
+                )
+            )
+
+    _sync_team_connection(connection, team_id, settings)
+    _clear_ctfd_caches()
+
+
+def _team_field_deleted(mapper, connection, target):
+    settings = _load_settings()
+    context = _team_field_event_context(connection, target, settings)
+    if context is None or get_config("user_mode", default="teams") != "teams":
+        return
+
+    team_id, field_id = context
+    managed_table = CampusManagedTeamFieldEntry.__table__
+    connection.execute(
+        delete(managed_table).where(
+            managed_table.c.team_id == team_id,
+            managed_table.c.field_id == field_id,
+            managed_table.c.entry_id == target.id,
+        )
+    )
+    _sync_team_connection(connection, team_id, settings)
+    _clear_ctfd_caches()
+
+
 def _user_field_changed(mapper, connection, target):
     settings = _load_settings()
-    changed = False
+    user_id = getattr(target, "user_id", None)
+    if user_id is None:
+        return
 
-    if target.user_id is not None:
-        _sync_user_connection(connection, target.user_id, settings)
-        changed = True
-
-    # CTFd stores Team Custom Field entries in field_entries with type='team'
-    # and team_id set (user_id is NULL). Reconcile that team on insert/update/
-    # delete so changing the team's Campus value takes effect immediately.
-    team_id = getattr(target, "team_id", None)
-    if team_id is not None and get_config("user_mode", default="teams") == "teams":
-        _sync_team_connection(connection, team_id, settings)
-        changed = True
-
-    if changed:
-        _clear_ctfd_caches()
+    _sync_user_connection(connection, user_id, settings)
+    _clear_ctfd_caches()
 
 
 def _tag_changed(mapper, connection, target):
@@ -1079,6 +1376,11 @@ def _register_model_events():
         event.listen(UserFieldEntries, action, _user_field_changed)
         event.listen(Tags, action, _tag_changed)
         event.listen(Users, action, _user_team_changed)
+
+    # Team fields have their own CTFd mapper, distinct from UserFieldEntries.
+    event.listen(TeamFieldEntries, "after_insert", _team_field_manually_changed)
+    event.listen(TeamFieldEntries, "after_update", _team_field_manually_changed)
+    event.listen(TeamFieldEntries, "after_delete", _team_field_deleted)
 
     _MODEL_EVENTS_REGISTERED = True
 
