@@ -23,8 +23,8 @@ The detection is feature-based, so a checkout reporting \`3.8.0\` can still use 
 - Assign users to audiences from a user Custom Field (default: \`campus\`).
 - Assign challenges to modules from their tags.
 - Configure which audiences can access each module.
-- Synchronize existing users and challenges at startup or from the admin plugin page.
-- Automatically resync when a user or team Custom Field entry, team membership, or challenge tag changes.
+- Synchronize existing users and challenges at startup, automatically every 10 minutes, or from the admin plugin page.
+- Automatically resync when a player logs in, a user or team Custom Field entry or team membership changes, or a challenge tag changes.
 - In CTFd Teams mode, use a non-empty Team Custom Field as the audience source of truth; fill it automatically from the members' non-empty User Custom Fields only when they all agree.
 - Enforce module access on challenge lists, challenge details, nested challenge APIs, standalone hint/solution APIs, hint/solution unlocks, attempts, challenge files, and solution-file downloads.
 - Keep challenges without a plugin-managed tag assignment public in the legacy compatibility mode.
@@ -97,6 +97,8 @@ In Users mode, each user is assigned independently.
 - User team changes recalculate the Team Custom Field from the new membership of both the old and new teams.
 - Challenge tag changes update the plugin-managed module assignment immediately.
 - Startup/manual synchronization also processes records that existed before the plugin was installed.
+- A full synchronization runs automatically every 10 minutes. A shared database timestamp ensures that only one CTFd worker claims each scheduled run.
+- After a successful player login, the plugin immediately recalculates that player's audience (or their team's audience in Teams mode), including a `Campus` Custom Field value refreshed during the login request.
 - The plugin stores ownership markers so it removes only memberships/access links it created. Existing manually-added audience memberships and module access links are preserved.
 - For modules configured by this plugin, an additional manually-created access link remains an independent grant. Remove such links in CTFd if the configured mapping must be the only way to access that module.
 
