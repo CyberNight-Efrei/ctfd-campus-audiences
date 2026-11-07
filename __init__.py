@@ -1258,6 +1258,20 @@ def _sync_everything():
     return len(user_ids), len(challenge_ids)
 
 
+def _ensure_periodic_sync_state():
+    """Record the startup sync so the first scheduled run is ten minutes later."""
+    try:
+        with db.engine.begin() as connection:
+            connection.execute(
+                CampusSyncState.__table__.insert().values(
+                    id=1, last_started_at=datetime.utcnow()
+                )
+            )
+    except IntegrityError:
+        # Another worker already initialized the shared schedule row.
+        pass
+
+
 def _claim_periodic_sync_slot():
     """Atomically let a single worker start a sync every ten minutes."""
     now = datetime.utcnow()
@@ -1765,6 +1779,7 @@ def load(app):
         db.create_all()
         _register_model_events()
         _sync_everything()
+        _ensure_periodic_sync_state()
 
     if not getattr(app, "_campus_audiences_login_signal_registered", False):
         user_logged_in.connect(_user_logged_in, sender=app, weak=False)
