@@ -1,9 +1,13 @@
 import json
 import logging
 import os
+import threading
+from datetime import datetime, timedelta
 
 from flask import abort, redirect, request, url_for
-from sqlalchemy import and_, delete, event, select, text
+from flask_login import user_logged_in
+from sqlalchemy import and_, delete, event, or_, select, text
+from sqlalchemy.exc import IntegrityError
 
 from CTFd.models import (
     Challenges,
@@ -25,6 +29,8 @@ PLUGIN_NAME = "ctfd_campus_audiences"
 CONFLICT_MODULE_NAME = "__conflicting_tag_mapping__"
 SYNC_LOCK_NAME = "ctfd_campus_audiences_sync"
 SYNC_LOCK_TIMEOUT_SECONDS = 300
+SYNC_INTERVAL_SECONDS = 10 * 60
+SYNC_SCHEDULER_POLL_SECONDS = 30
 LOGGER = logging.getLogger("ctfd-campus-audiences")
 _MODEL_EVENTS_REGISTERED = False
 
@@ -208,6 +214,15 @@ class CampusManagedChallenge(db.Model):
         unique=True,
     )
     module_id = db.Column(db.Integer, nullable=False)
+
+
+class CampusSyncState(db.Model):
+    """Shared timestamp used to elect one worker for each periodic sync."""
+
+    __tablename__ = "campus_sync_state"
+
+    id = db.Column(db.Integer, primary_key=True)
+    last_started_at = db.Column(db.DateTime, nullable=True)
 
 
 def _settings_path():
@@ -1243,6 +1258,72 @@ def _sync_everything():
     return len(user_ids), len(challenge_ids)
 
 
+def _claim_periodic_sync_slot():
+    """Atomically let a single worker start a sync every ten minutes."""
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=SYNC_INTERVAL_SECONDS)
+    schedule_table = CampusSyncState.__table__
+
+    with db.engine.begin() as connection:
+        claimed = connection.execute(
+            schedule_table.update()
+            .where(
+                and_(
+                    schedule_table.c.id == 1,
+                    or_(
+                        schedule_table.c.last_started_at.is_(None),
+                        schedule_table.c.last_started_at <= cutoff,
+                    ),
+                )
+            )
+            .values(last_started_at=now)
+        )
+        if claimed.rowcount == 1:
+            return True
+
+    # The first worker creates the singleton row. Other workers racing to
+    # create it lose the unique-key race and simply skip this scheduled run.
+    try:
+        with db.engine.begin() as connection:
+            connection.execute(
+                schedule_table.insert().values(id=1, last_started_at=now)
+            )
+        return True
+    except IntegrityError:
+        return False
+
+
+def _periodic_sync_loop(app):
+    """Run the full synchronization on a ten-minute cadence."""
+    stop_event = threading.Event()
+    while not stop_event.wait(SYNC_SCHEDULER_POLL_SECONDS):
+        try:
+            with app.app_context():
+                if _claim_periodic_sync_slot():
+                    LOGGER.info("Starting scheduled campus synchronization")
+                    _sync_everything()
+        except Exception:
+            LOGGER.exception("Scheduled campus synchronization failed")
+
+
+def _start_periodic_sync(app):
+    if getattr(app, "_campus_audiences_scheduler_started", False):
+        return
+
+    worker = threading.Thread(
+        target=_periodic_sync_loop,
+        args=(app,),
+        name="ctfd-campus-audiences-sync",
+        daemon=True,
+    )
+    worker.start()
+    app._campus_audiences_scheduler_started = True
+    LOGGER.info(
+        "Campus synchronization scheduler started (every %d seconds)",
+        SYNC_INTERVAL_SECONDS,
+    )
+
+
 def _team_field_event_context(connection, target, settings):
     if getattr(target, "type", None) != "team":
         return None
@@ -1356,6 +1437,27 @@ def _user_field_changed(mapper, connection, target):
 
     _sync_user_connection(connection, user_id, settings)
     _clear_ctfd_caches()
+
+
+def _user_logged_in(sender, user, **extra):
+    """Refresh the player's audience as soon as CTFd authenticates them."""
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return
+
+    try:
+        # Reuse CTFd's current SQLAlchemy transaction so any Custom Field value
+        # refreshed during the login request is visible to this synchronization.
+        connection = db.session.connection()
+        _sync_user_connection(connection, user_id, _load_settings())
+        _clear_ctfd_caches()
+        LOGGER.info("Synchronized campus audience after login for user %s", user_id)
+    except Exception:
+        # A synchronization problem must be logged, but should not prevent a
+        # player from signing in.
+        LOGGER.exception(
+            "Campus synchronization after login failed for user %s", user_id
+        )
 
 
 def _tag_changed(mapper, connection, target):
@@ -1664,6 +1766,10 @@ def load(app):
         _register_model_events()
         _sync_everything()
 
+    if not getattr(app, "_campus_audiences_login_signal_registered", False):
+        user_logged_in.connect(_user_logged_in, sender=app, weak=False)
+        app._campus_audiences_login_signal_registered = True
+
     app.before_request(_enforce_challenge_access)
     app.after_request(_filter_challenge_list)
 
@@ -1673,3 +1779,5 @@ def load(app):
         view_func=admins_only(_admin_sync),
         methods=["POST"],
     )
+
+    _start_periodic_sync(app)
