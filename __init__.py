@@ -5,7 +5,6 @@ import threading
 from datetime import datetime, timedelta
 
 from flask import abort, redirect, request, url_for
-from flask_login import user_logged_in
 from sqlalchemy import and_, delete, event, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -1453,25 +1452,32 @@ def _user_field_changed(mapper, connection, target):
     _clear_ctfd_caches()
 
 
-def _user_logged_in(sender, user, **extra):
-    """Refresh the player's audience as soon as CTFd authenticates them."""
+def _sync_after_login(response):
+    """Refresh the player's audience after CTFd successfully handles login."""
+    if request.method != "POST" or request.path.rstrip("/") != "/login":
+        return response
+    if response.status_code >= 400:
+        return response
+
+    user = get_current_user()
     user_id = getattr(user, "id", None)
     if user_id is None:
-        return
+        return response
 
     try:
-        # Reuse CTFd's current SQLAlchemy transaction so any Custom Field value
-        # refreshed during the login request is visible to this synchronization.
+        # Use CTFd's own login flow and session; no optional Flask-Login
+        # dependency or signal import is required.
         connection = db.session.connection()
         _sync_user_connection(connection, user_id, _load_settings())
         _clear_ctfd_caches()
         LOGGER.info("Synchronized campus audience after login for user %s", user_id)
     except Exception:
-        # A synchronization problem must be logged, but should not prevent a
-        # player from signing in.
+        # A synchronization problem must not prevent a player from signing in.
         LOGGER.exception(
             "Campus synchronization after login failed for user %s", user_id
         )
+
+    return response
 
 
 def _tag_changed(mapper, connection, target):
@@ -1781,12 +1787,9 @@ def load(app):
         _sync_everything()
         _ensure_periodic_sync_state()
 
-    if not getattr(app, "_campus_audiences_login_signal_registered", False):
-        user_logged_in.connect(_user_logged_in, sender=app, weak=False)
-        app._campus_audiences_login_signal_registered = True
-
     app.before_request(_enforce_challenge_access)
     app.after_request(_filter_challenge_list)
+    app.after_request(_sync_after_login)
 
     app.add_url_rule(
         "/admin/plugins/{}/sync".format(PLUGIN_NAME),
