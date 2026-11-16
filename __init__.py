@@ -16,6 +16,7 @@ from CTFd.models import (
     Solutions,
     Tags,
     TeamFieldEntries,
+    Teams,
     UserFieldEntries,
     Users,
     db,
@@ -282,24 +283,8 @@ def _normalise(value):
     return value.casefold() if value else None
 
 
-def _unanimous_custom_field_value(values, member_count):
-    # Empty values do not create a conflict: at least one member must provide
-    # a campus, and every non-empty campus must agree after normalization.
-    if member_count <= 0:
-        return None
-
-    cleaned_values = [
-        cleaned
-        for cleaned in (_clean_custom_field_value(value) for value in values)
-        if cleaned is not None
-    ]
-    if not cleaned_values:
-        return None
-
-    if len({_normalise(value) for value in cleaned_values}) != 1:
-        return None
-
-    return cleaned_values[0]
+def _captain_custom_field_value(value):
+    return _clean_custom_field_value(value)
 
 
 def _team_field_value_was_manually_changed(current_value, generated_value):
@@ -565,7 +550,7 @@ def _audience_id_for_team(connection, team_id, settings):
 
     if field_exists is None:
         # Backward compatibility: when no matching Team Custom Field is
-        # defined, derive the team's campus from unanimous user fields.
+        # defined, derive the team's campus from its captain.
         return False, None
 
     statement = (
@@ -704,7 +689,7 @@ def _sync_team_membership(connection, team_id, audience_id):
 
 
 def _team_custom_field_value_from_users(connection, team_id, user_field_name):
-    """Return a team-wide campus when all non-empty member values agree."""
+    """Return the captain's campus as the team's campus."""
     if not isinstance(user_field_name, str) or not user_field_name.strip():
         return None
 
@@ -719,35 +704,24 @@ def _team_custom_field_value_from_users(connection, team_id, user_field_name):
     if user_field is None:
         return None
 
-    member_ids = [
-        row[0]
-        for row in connection.execute(
-            select(Users.__table__.c.id)
-            .where(Users.__table__.c.team_id == team_id)
-            .order_by(Users.__table__.c.id)
-        ).all()
-    ]
-    if not member_ids:
+    captain = connection.execute(
+        select(Teams.__table__.c.captain_id).where(
+            Teams.__table__.c.id == team_id
+        )
+    ).first()
+    if captain is None or captain[0] is None:
         return None
 
-    rows = connection.execute(
-        select(entries.c.user_id, entries.c.value)
+    row = connection.execute(
+        select(entries.c.value)
         .where(
             entries.c.field_id == user_field[0],
             entries.c.type == "user",
-            entries.c.user_id.in_(member_ids),
+            entries.c.user_id == captain[0],
         )
         .order_by(entries.c.id.desc())
-    ).all()
-
-    values_by_user = {}
-    # Match _audience_id_for_user: the newest row wins if legacy data contains
-    # multiple entries for the same user and field.
-    for user_id, value in rows:
-        values_by_user.setdefault(user_id, value)
-
-    member_values = [values_by_user.get(user_id) for user_id in member_ids]
-    return _unanimous_custom_field_value(member_values, len(member_ids))
+    ).first()
+    return _captain_custom_field_value(row[0] if row else None)
 
 
 def _sync_team_custom_field_from_users(connection, team_id, settings):
@@ -888,7 +862,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
         else:
             # Before ownership tracking existed, the plugin may already have
             # populated this field. Adopt a single existing value only when
-            # it exactly agrees with today's member-derived value. Otherwise
+            # it exactly agrees with today's captain-derived value. Otherwise
             # preserve it as a manual override.
             team_value = _team_custom_field_value_from_users(
                 connection, team_id, user_field_name
@@ -917,7 +891,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
 
     if managed_entry_id is not None:
         if team_value is None:
-            # A disagreement (or no member campus) clears only the value that
+            # A missing captain campus clears only the value that
             # the plugin itself generated. Manual values are never deleted.
             connection.execute(
                 delete(entries).where(entries.c.id == managed_entry_id)
@@ -945,7 +919,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
         return True
 
     if team_value is None:
-        # No non-empty values or a conflict: leave empty Team Field rows as-is.
+        # No captain campus: leave empty Team Field rows as-is.
         return True
 
     # Reuse an empty Team Field row if CTFd created one, otherwise insert one.
@@ -1000,7 +974,7 @@ def _sync_team_connection(connection, team_id, settings):
 
     if not has_team_field:
         # Compatibility mode for installations without a Team Custom Field:
-        # derive directly from all non-empty member values, ignoring blanks.
+        # derive directly from the captain's user field.
         team_value = _team_custom_field_value_from_users(
             connection, team_id, settings.get("user_field", "campus")
         )
@@ -1452,6 +1426,18 @@ def _user_field_changed(mapper, connection, target):
     _clear_ctfd_caches()
 
 
+def _team_changed(mapper, connection, target):
+    if get_config("user_mode", default="teams") != "teams":
+        return
+
+    team_id = getattr(target, "id", None)
+    if team_id is None:
+        return
+
+    _sync_team_connection(connection, team_id, _load_settings())
+    _clear_ctfd_caches()
+
+
 def _sync_after_login(response):
     """Refresh the player's audience after CTFd successfully handles login."""
     if request.method != "POST" or request.path.rstrip("/") != "/login":
@@ -1498,6 +1484,8 @@ def _register_model_events():
         event.listen(UserFieldEntries, action, _user_field_changed)
         event.listen(Tags, action, _tag_changed)
         event.listen(Users, action, _user_team_changed)
+
+    event.listen(Teams, "after_update", _team_changed)
 
     # Team fields have their own CTFd mapper, distinct from UserFieldEntries.
     event.listen(TeamFieldEntries, "after_insert", _team_field_manually_changed)

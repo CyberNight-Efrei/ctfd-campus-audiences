@@ -8,7 +8,7 @@ tree = ast.parse(source)
 helper_names = {
     "_clean_custom_field_value",
     "_normalise",
-    "_unanimous_custom_field_value",
+    "_captain_custom_field_value",
     "_team_field_value_was_manually_changed",
     "_has_untracked_team_field_value",
 }
@@ -24,7 +24,7 @@ exec(compile(isolated_module, "__init__.py", "exec"), namespace)
 
 clean = namespace["_clean_custom_field_value"]
 normalise = namespace["_normalise"]
-unanimous = namespace["_unanimous_custom_field_value"]
+captain_value = namespace["_captain_custom_field_value"]
 was_manually_changed = namespace["_team_field_value_was_manually_changed"]
 has_manual_team_value = namespace["_has_untracked_team_field_value"]
 
@@ -37,21 +37,12 @@ assert normalise(" Bordeaux ") == "bordeaux"
 assert normalise("") is None
 assert normalise(None) is None
 
-# The Team Custom Field is filled when at least one member has a campus
-# and every non-empty campus agrees.
-assert unanimous(["Paris", "Paris"], 2) == "Paris"
-assert unanimous(['"Paris"', "paris"], 2) == "Paris"
-assert unanimous([" Bordeaux ", "Bordeaux"], 2) == "Bordeaux"
-assert unanimous(["Paris", None], 2) == "Paris"
-assert unanimous(["Paris", ""], 2) == "Paris"
-assert unanimous(["Paris", None, "Paris"], 3) == "Paris"
-
-# Different non-empty campuses conflict; no campus values means no assignment.
-assert unanimous(["Paris", "Bordeaux"], 2) is None
-assert unanimous(["Paris", "Bordeaux", None], 3) is None
-assert unanimous([None, ""], 2) is None
-assert unanimous(["Paris"], 0) is None
-assert unanimous([], 0) is None
+# Team campus comes from the captain; other members may have different
+# campuses without affecting the team value.
+assert captain_value('"Paris"') == "Paris"
+assert captain_value(" Bordeaux ") == "Bordeaux"
+assert captain_value("") is None
+assert captain_value(None) is None
 assert clean('"Paris"') == "Paris"
 
 # Existing non-empty Team Custom Fields are manual values unless they are
@@ -64,4 +55,4 @@ assert not was_manually_changed('"Paris"', "Paris")
 assert was_manually_changed("Bordeaux", "Paris")
 assert not was_manually_changed("", "Paris")
 
-print("Custom Field normalization, team consensus, and ownership checks passed")
+print("Custom Field normalization, captain campus, and ownership checks passed")
