@@ -25,7 +25,7 @@ The detection is feature-based, so a checkout reporting \`3.8.0\` can still use 
 - Configure which audiences can access each module.
 - Synchronize existing users and challenges at startup, automatically every 10 minutes, or from the admin plugin page.
 - Automatically resync when a player logs in, a user or team Custom Field entry or team membership changes, or a challenge tag changes.
-- In CTFd Teams mode, use a non-empty Team Custom Field as the audience source of truth; otherwise use the captain's User Custom Field, allowing mixed-campus teams.
+- In CTFd Teams mode, use a non-empty Team Custom Field as the audience source of truth; otherwise use every campus of the team's members: a mixed-campus team (ForFun) gets the audience of each of its campuses.
 - Enforce module access on challenge lists, challenge details, nested challenge APIs, standalone hint/solution APIs, hint/solution unlocks, attempts, challenge files, and solution-file downloads.
 - Keep challenges without a plugin-managed tag assignment public in the legacy compatibility mode.
 - Deny regular users access to a challenge with tags mapped to multiple modules (fail closed).
@@ -77,28 +77,29 @@ Rules:
 - \`module_to_audiences\` defines which audiences may access a module.
 - If a module is missing from \`module_to_audiences\`, it defaults to an audience with the same name.
 - An explicit empty list (\`"Module X": []\`) means the plugin creates no access link for that module. Any independent manual access link already present in CTFd is preserved.
-- A blank or unmapped Custom Field gives the user no plugin-managed audience.
+- A blank or unmapped Custom Field gives the user no plugin-managed audience. Leave on-line campuses such as `Remote` unmapped: those players (and teams with only such members) see no campus module, only untagged challenges.
+- Custom Field names are matched case-insensitively (`Campus` and `campus` are the same field).
 - A challenge without a tag matching \`tag_to_module\` receives no plugin-managed module assignment. In native mode, any independent manual \`module_id\` assignment is left untouched.
 
 ## Teams mode behavior
 
-CTFd's Teams mode shares solves and challenge access across the team. When a matching Team Custom Field exists (`team_field`, defaulting to `user_field`), its non-empty value is the source of truth for the team's audience, even when the captain has no User Custom Field value. Administrators can fill this Team Custom Field manually. When the Team Custom Field is empty, the plugin derives it from the captain's User Custom Field; other members may have different campuses or no campus. Automatically generated values are tracked so the plugin can update or clear only its own values when the captain's data changes; manually entered values are preserved and are never replaced by automatic derivation. If no matching Team Custom Field exists (or `team_field` is explicitly set to `null`), the compatibility fallback computes the audience directly from the captain's User Custom Field without writing a Team Custom Field.
+CTFd's Teams mode shares solves and challenge access across the team. When a matching Team Custom Field exists (`team_field`, defaulting to `user_field`), its non-empty value is the source of truth for the team's audience, even when the captain has no User Custom Field value. Administrators can fill this Team Custom Field manually. When the Team Custom Field is empty, the plugin derives it from its members' User Custom Fields: every distinct campus, sorted and comma separated (for example `Bordeaux, Paris, Remote`). Each mapped campus gives the team its audience; unmapped ones (such as `Remote`) give none. Automatically generated values are tracked so the plugin can update or clear only its own values when a member's campus or the team's members change; manually entered values are preserved and are never replaced by automatic derivation. If no matching Team Custom Field exists (or `team_field` is explicitly set to `null`), the compatibility fallback computes the audiences directly from the members' User Custom Fields without writing a Team Custom Field.
 
 In Users mode, each user is assigned independently.
 
-**Upgrade note:** older plugin versions did not track whether a Team Custom Field value was generated or entered manually. On the first synchronization after upgrading, a single existing value that exactly matches the current captain-derived value is adopted as generated; other existing non-empty values are kept as manual overrides. A manual edit made through CTFd after this upgrade is explicitly recorded as manual, even when it matches the captain's current value.
+**Upgrade note:** older plugin versions did not track whether a Team Custom Field value was generated or entered manually. On the first synchronization after upgrading, a single existing value that exactly matches the current member-derived value is adopted as generated; other existing non-empty values are kept as manual overrides. A manual edit made through CTFd after this upgrade is explicitly recorded as manual, even when it matches the members' current value.
 
 ## Synchronization and ownership
 
 - User Custom Field changes recalculate the affected team's Team Custom Field and audience immediately, unless the Team Custom Field contains an explicit manual value.
 - Team Custom Field insertions, edits, and deletions are synchronized immediately; non-empty values entered through CTFd are recorded as manual overrides.
-- A non-empty manual Team Custom Field is authoritative for the team audience. When it is empty, the plugin fills it from the captain's non-empty User Custom Field.
-- If the captain has no campus, the plugin clears only its own previously generated Team Custom Field value and removes the team's plugin-managed campus audience. Manually entered values are preserved.
+- A non-empty manual Team Custom Field is authoritative for the team audience. When it is empty, the plugin fills it from the members' non-empty User Custom Fields. A manual value may also list several campuses, comma separated.
+- If no member has a campus, the plugin clears only its own previously generated Team Custom Field value and removes the team's plugin-managed campus audiences. Manually entered values are preserved.
 - User team changes recalculate the Team Custom Field from the new membership of both the old and new teams.
 - Challenge tag changes update the plugin-managed module assignment immediately.
 - Startup/manual synchronization also processes records that existed before the plugin was installed.
 - A full synchronization runs automatically every 10 minutes. A shared database timestamp ensures that only one CTFd worker claims each scheduled run.
-- After a successful player login, the plugin immediately recalculates that player's audience (or their team's audience in Teams mode), including a `Campus` Custom Field value refreshed during the login request.
+- After a successful player login (the native form, or the Keycloak login of the `cybn` plugin at `/cybn/callback`), the plugin immediately recalculates that player's audience (or their team's audience in Teams mode), including a `Campus` Custom Field value refreshed during the login request.
 - The plugin stores ownership markers so it removes only memberships/access links it created. Existing manually-added audience memberships and module access links are preserved.
 - For modules configured by this plugin, an additional manually-created access link remains an independent grant. Remove such links in CTFd if the configured mapping must be the only way to access that module.
 
