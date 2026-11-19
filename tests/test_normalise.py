@@ -8,7 +8,8 @@ tree = ast.parse(source)
 helper_names = {
     "_clean_custom_field_value",
     "_normalise",
-    "_captain_custom_field_value",
+    "_campus_values",
+    "_team_campus_value",
     "_team_field_value_was_manually_changed",
     "_has_untracked_team_field_value",
 }
@@ -24,7 +25,8 @@ exec(compile(isolated_module, "__init__.py", "exec"), namespace)
 
 clean = namespace["_clean_custom_field_value"]
 normalise = namespace["_normalise"]
-captain_value = namespace["_captain_custom_field_value"]
+campus_values = namespace["_campus_values"]
+team_campus = namespace["_team_campus_value"]
 was_manually_changed = namespace["_team_field_value_was_manually_changed"]
 has_manual_team_value = namespace["_has_untracked_team_field_value"]
 
@@ -37,12 +39,13 @@ assert normalise(" Bordeaux ") == "bordeaux"
 assert normalise("") is None
 assert normalise(None) is None
 
-# Team campus comes from the captain; other members may have different
-# campuses without affecting the team value.
-assert captain_value('"Paris"') == "Paris"
-assert captain_value(" Bordeaux ") == "Bordeaux"
-assert captain_value("") is None
-assert captain_value(None) is None
+# A team's campus is every campus of its members (ForFun teams can be mixed)
+assert campus_values('"Paris"') == ["Paris"]
+assert campus_values("Bordeaux, Paris") == ["Bordeaux", "Paris"]
+assert campus_values("") == [] and campus_values(None) == []
+assert team_campus(['"Paris"', "Paris", " paris "]) == "Paris"
+assert team_campus(["Remote", '"Paris"', "Bordeaux", None, ""]) == "Bordeaux, Paris, Remote"
+assert team_campus([]) is None and team_campus([None]) is None
 assert clean('"Paris"') == "Paris"
 
 # Existing non-empty Team Custom Fields are manual values unless they are
@@ -55,4 +58,4 @@ assert not was_manually_changed('"Paris"', "Paris")
 assert was_manually_changed("Bordeaux", "Paris")
 assert not was_manually_changed("", "Paris")
 
-print("Custom Field normalization, captain campus, and ownership checks passed")
+print("Custom Field normalization, team campuses, and ownership checks passed")

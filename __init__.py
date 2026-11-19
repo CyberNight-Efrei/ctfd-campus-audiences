@@ -5,7 +5,7 @@ import threading
 from datetime import datetime, timedelta
 
 from flask import abort, redirect, request, url_for
-from sqlalchemy import and_, delete, event, or_, select, text
+from sqlalchemy import and_, delete, event, false, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
 from CTFd.models import (
@@ -283,8 +283,28 @@ def _normalise(value):
     return value.casefold() if value else None
 
 
-def _captain_custom_field_value(value):
-    return _clean_custom_field_value(value)
+def _campus_values(value):
+    """Campuses of a Custom Field value: a mixed team holds several, comma separated."""
+    value = _clean_custom_field_value(value)
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _team_campus_value(member_values):
+    """Team campus from its members' values: every distinct campus, sorted, or None."""
+    campuses = {}
+    for value in member_values:
+        for campus in _campus_values(value):
+            campuses.setdefault(campus.casefold(), campus)
+    return ", ".join(campuses[key] for key in sorted(campuses)) or None
+
+
+def _field_named(column, name):
+    """Custom Field name match, case-insensitive (`Campus` and `campus` are the same field)."""
+    if not isinstance(name, str) or not name.strip():
+        return false()  # team_field: null
+    return func.lower(column) == name.strip().lower()
 
 
 def _team_field_value_was_manually_changed(current_value, generated_value):
@@ -516,7 +536,7 @@ def _audience_id_for_user(connection, user_id, settings):
             entries.c.user_id == user_id,
             entries.c.type == "user",
             fields.c.type == "user",
-            fields.c.name == field_name,
+            _field_named(fields.c.name, field_name),
         )
         .order_by(entries.c.id.desc())
     )
@@ -528,30 +548,26 @@ def _audience_id_for_user(connection, user_id, settings):
     return _ensure_named_row(connection, AudienceModel, audience_name)
 
 
-def _audience_id_for_team(connection, team_id, settings):
+def _audience_ids_for_team(connection, team_id, settings):
     # A dedicated Team Custom Field takes precedence when it is defined.
     # Its name defaults to user_field so existing settings.json files keep
     # working when the admin created the same Campus field for Users and Teams.
     field_name = settings.get(
         "team_field", settings.get("user_field", "campus")
     )
-    campus_to_audience = _normalised_mapping(
-        settings.get("campus_to_audience", {})
-    )
-
     entries = UserFieldEntries.__table__
     fields = Fields.__table__
     field_exists = connection.execute(
         select(fields.c.id).where(
             fields.c.type == "team",
-            fields.c.name == field_name,
+            _field_named(fields.c.name, field_name),
         )
     ).first()
 
     if field_exists is None:
         # Backward compatibility: when no matching Team Custom Field is
-        # defined, derive the team's campus from its captain.
-        return False, None
+        # defined, derive the team's campuses from its members.
+        return False, []
 
     statement = (
         select(entries.c.value)
@@ -560,7 +576,7 @@ def _audience_id_for_team(connection, team_id, settings):
             entries.c.team_id == team_id,
             entries.c.type == "team",
             fields.c.type == "team",
-            fields.c.name == field_name,
+            _field_named(fields.c.name, field_name),
         )
         .order_by(entries.c.id.desc())
     )
@@ -569,13 +585,22 @@ def _audience_id_for_team(connection, team_id, settings):
     # A configured Team Custom Field is authoritative. An empty or unmapped
     # value must not silently fall back to members' individual campus values.
     if row is None:
-        return True, None
+        return True, []
 
-    audience_name = campus_to_audience.get(_normalise(row[0]))
-    if not audience_name:
-        return True, None
+    return True, _audience_ids_for_value(connection, row[0], settings)
 
-    return True, _ensure_named_row(connection, AudienceModel, audience_name)
+
+def _audience_ids_for_value(connection, value, settings):
+    """Audiences of a (possibly multi-campus) value; unmapped campuses (Remote) give none."""
+    campus_to_audience = _normalised_mapping(
+        settings.get("campus_to_audience", {})
+    )
+    names = []
+    for campus in _campus_values(value):
+        name = campus_to_audience.get(_normalise(campus))
+        if name and name not in names:
+            names.append(name)
+    return [_ensure_named_row(connection, AudienceModel, name) for name in names]
 
 
 def _sync_user_membership(connection, user_id, audience_id):
@@ -633,7 +658,7 @@ def _sync_user_membership(connection, user_id, audience_id):
     )
 
 
-def _sync_team_membership(connection, team_id, audience_id):
+def _sync_team_membership(connection, team_id, audience_ids):
     membership_table = TeamAudienceMemberModel.__table__
     managed_table = CampusManagedTeamAudienceMember.__table__
 
@@ -658,38 +683,37 @@ def _sync_team_membership(connection, team_id, audience_id):
         delete(managed_table).where(managed_table.c.team_id == team_id)
     )
 
-    if audience_id is None:
-        return
-
-    conditions = [
-        membership_table.c.team_id == team_id,
-        membership_table.c.audience_id == audience_id,
-    ]
-    if "user_id" in membership_table.c:
-        conditions.append(membership_table.c.user_id.is_(None))
-
-    existing = connection.execute(
-        select(membership_table.c.id).where(and_(*conditions))
-    ).first()
-
-    created_by_plugin = existing is None
-    if created_by_plugin:
-        values = {"audience_id": audience_id, "team_id": team_id}
+    # A mixed team (ForFun) gets the audience of every campus of its members
+    for audience_id in audience_ids:
+        conditions = [
+            membership_table.c.team_id == team_id,
+            membership_table.c.audience_id == audience_id,
+        ]
         if "user_id" in membership_table.c:
-            values["user_id"] = None
-        connection.execute(membership_table.insert().values(**values))
+            conditions.append(membership_table.c.user_id.is_(None))
 
-    connection.execute(
-        managed_table.insert().values(
-            audience_id=audience_id,
-            team_id=team_id,
-            created_by_plugin=created_by_plugin,
+        existing = connection.execute(
+            select(membership_table.c.id).where(and_(*conditions))
+        ).first()
+
+        created_by_plugin = existing is None
+        if created_by_plugin:
+            values = {"audience_id": audience_id, "team_id": team_id}
+            if "user_id" in membership_table.c:
+                values["user_id"] = None
+            connection.execute(membership_table.insert().values(**values))
+
+        connection.execute(
+            managed_table.insert().values(
+                audience_id=audience_id,
+                team_id=team_id,
+                created_by_plugin=created_by_plugin,
+            )
         )
-    )
 
 
 def _team_custom_field_value_from_users(connection, team_id, user_field_name):
-    """Return the captain's campus as the team's campus."""
+    """The team's campuses: every distinct campus of its members, e.g. "Bordeaux, Paris"."""
     if not isinstance(user_field_name, str) or not user_field_name.strip():
         return None
 
@@ -698,30 +722,23 @@ def _team_custom_field_value_from_users(connection, team_id, user_field_name):
     user_field = connection.execute(
         select(fields.c.id).where(
             fields.c.type == "user",
-            fields.c.name == user_field_name,
+            _field_named(fields.c.name, user_field_name),
         )
     ).first()
     if user_field is None:
         return None
 
-    captain = connection.execute(
-        select(Teams.__table__.c.captain_id).where(
-            Teams.__table__.c.id == team_id
-        )
-    ).first()
-    if captain is None or captain[0] is None:
-        return None
-
-    row = connection.execute(
+    users = Users.__table__
+    rows = connection.execute(
         select(entries.c.value)
+        .select_from(entries.join(users, entries.c.user_id == users.c.id))
         .where(
             entries.c.field_id == user_field[0],
             entries.c.type == "user",
-            entries.c.user_id == captain[0],
+            users.c.team_id == team_id,
         )
-        .order_by(entries.c.id.desc())
-    ).first()
-    return _captain_custom_field_value(row[0] if row else None)
+    ).all()
+    return _team_campus_value(row[0] for row in rows)
 
 
 def _sync_team_custom_field_from_users(connection, team_id, settings):
@@ -744,7 +761,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
     team_field = connection.execute(
         select(fields.c.id).where(
             fields.c.type == "team",
-            fields.c.name == team_field_name,
+            _field_named(fields.c.name, team_field_name),
         )
     ).first()
     if team_field is None:
@@ -862,7 +879,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
         else:
             # Before ownership tracking existed, the plugin may already have
             # populated this field. Adopt a single existing value only when
-            # it exactly agrees with today's captain-derived value. Otherwise
+            # it exactly agrees with today's member-derived value. Otherwise
             # preserve it as a manual override.
             team_value = _team_custom_field_value_from_users(
                 connection, team_id, user_field_name
@@ -891,7 +908,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
 
     if managed_entry_id is not None:
         if team_value is None:
-            # A missing captain campus clears only the value that
+            # No member campus left: clear only the value that
             # the plugin itself generated. Manual values are never deleted.
             connection.execute(
                 delete(entries).where(entries.c.id == managed_entry_id)
@@ -919,7 +936,7 @@ def _sync_team_custom_field_from_users(connection, team_id, settings):
         return True
 
     if team_value is None:
-        # No captain campus: leave empty Team Field rows as-is.
+        # No member campus: leave empty Team Field rows as-is.
         return True
 
     # Reuse an empty Team Field row if CTFd created one, otherwise insert one.
@@ -968,27 +985,19 @@ def _sync_team_connection(connection, team_id, settings):
     # has no manual value.
     _sync_team_custom_field_from_users(connection, team_id, settings)
 
-    has_team_field, target_audience_id = _audience_id_for_team(
+    has_team_field, audience_ids = _audience_ids_for_team(
         connection, team_id, settings
     )
 
     if not has_team_field:
         # Compatibility mode for installations without a Team Custom Field:
-        # derive directly from the captain's user field.
+        # derive directly from the members' user field.
         team_value = _team_custom_field_value_from_users(
             connection, team_id, settings.get("user_field", "campus")
         )
-        campus_to_audience = _normalised_mapping(
-            settings.get("campus_to_audience", {})
-        )
-        audience_name = campus_to_audience.get(_normalise(team_value))
-        target_audience_id = (
-            _ensure_named_row(connection, AudienceModel, audience_name)
-            if audience_name
-            else None
-        )
+        audience_ids = _audience_ids_for_value(connection, team_value, settings)
 
-    _sync_team_membership(connection, team_id, target_audience_id)
+    _sync_team_membership(connection, team_id, audience_ids)
 
 
 def _sync_user_connection(connection, user_id, settings):
@@ -1329,7 +1338,11 @@ def _team_field_event_context(connection, target, settings):
             Fields.__table__.c.type == "team",
         )
     ).first()
-    if field_name is None or field_name[0] != team_field_name:
+    if (
+        field_name is None
+        or not isinstance(team_field_name, str)
+        or (field_name[0] or "").strip().lower() != team_field_name.strip().lower()
+    ):
         return None
 
     return team_id, field_id
@@ -1440,7 +1453,9 @@ def _team_changed(mapper, connection, target):
 
 def _sync_after_login(response):
     """Refresh the player's audience after CTFd successfully handles login."""
-    if request.method != "POST" or request.path.rstrip("/") != "/login":
+    # Native login form (POST /login) or Keycloak login (cybn plugin callback)
+    path = request.path.rstrip("/")
+    if path != "/cybn/callback" and (request.method != "POST" or path != "/login"):
         return response
     if response.status_code >= 400:
         return response
